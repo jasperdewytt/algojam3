@@ -12,6 +12,15 @@ from scipy.optimize import minimize
 
 DAILY_BUDGET = 600_000
 
+UQ_FAIR_VALUE = 100.0
+
+FINTECH_WARMUP = 30
+FINTECH_EWMA_CONFIGS = (
+    (0.85, 0.75),
+    (0.90, 0.80),
+    (0.95, 0.85),
+)
+
 JEANS_Q_LEVEL = 0.5
 JEANS_Q_SLOPE = 0.05
 JEANS_OBSERVATION_VARIANCE = 5.0
@@ -24,6 +33,21 @@ JEANS_REVERT_THRESHOLD = 0.2
 MENUDASH_WARMUP = 60
 MENUDASH_MAPPING_WINDOWS = (60, 120, 240)
 FOOD_EMA_ALPHAS = (0.10, 0.15, 0.20)
+
+SIZZLE_WINDOW = 15
+SIZZLE_SEED = np.array([
+    0.00530057,  # Intercept
+    0.07690641,  # Bread change
+    1.67799649,  # Sausage change
+])
+
+BOAT_WARMUP = 30
+BOAT_WINDOW_LENGTH = 21
+BOAT_POLYORDER = 8
+BOAT_ALPHA = 0.9
+BOAT_TREND_THRESHOLD = 1.0
+BOAT_FORECAST_HORIZON = 1
+BOAT_REVERT_THRESHOLD = 0.1
 
 class FairValue(ABC):
     def __init__(self, fair_value: float | None = None) -> None:
@@ -621,11 +645,63 @@ class Algorithm():
         price = self.data["UQ Dollar"][-1]
         limit = self.positionLimits["UQ Dollar"]
 
-        if price > 100.0:
+        if price > UQ_FAIR_VALUE:
             return -limit
 
-        if price < 100.0:
+        if price < UQ_FAIR_VALUE:
             return limit
+
+        return 0
+
+    def _sausage_sizzle_position(self):
+        bread = np.asarray(self.data["Bread"], dtype=float)
+        sausage = np.asarray(self.data["Sausage"], dtype=float)
+        sizzle = np.asarray(self.data["Sausage Sizzle"], dtype=float)
+
+        limit = self.positionLimits["Sausage Sizzle"]
+
+        if self.day == 0:
+            return 0
+
+        current_features = np.array([
+            1.0,
+            bread[self.day] - bread[self.day - 1],
+            sausage[self.day] - sausage[self.day - 1],
+        ])
+
+        if self.day <= SIZZLE_WINDOW:
+            coefficients = SIZZLE_SEED
+
+        else:
+            start = self.day - SIZZLE_WINDOW
+            feature_rows = []
+            targets = []
+
+            for observation_day in range(start, self.day):
+                feature_rows.append(
+                    [
+                        1.0,
+                        bread[observation_day] - bread[observation_day - 1],
+                        sausage[observation_day] - sausage[observation_day - 1],
+                    ]
+                )
+
+                targets.append(
+                    sizzle[observation_day + 1] - sizzle[observation_day]
+                )
+
+            design = np.asarray(feature_rows, dtype=float)
+            targets = np.asarray(targets, dtype=float)
+
+            coefficients, *_ = np.linalg.lstsq(design, targets, rcond=None)
+
+        predicted_change = float(current_features @ coefficients)
+
+        if predicted_change > 0:
+            return limit
+
+        if predicted_change < 0:
+            return -limit
 
         return 0
 
@@ -726,6 +802,139 @@ class Algorithm():
 
         return 0
 
+    def _fintech_token_position(self):
+        prices = np.asarray(self.data["Fintech Token"], dtype=float)
+        limit = self.positionLimits["Fintech Token"]
+
+        if self.day == 0:
+            return 0
+
+        changes = np.diff(prices)
+        latest_change = float(changes[-1])
+
+        if not np.isfinite(latest_change) or latest_change == 0:
+            return 0
+
+        latest_direction = int(np.sign(latest_change))
+
+        if len(changes) <= FINTECH_WARMUP:
+            return -limit * latest_direction
+
+        votes = 0
+
+        for decay, percentile in FINTECH_EWMA_CONFIGS:
+            variance = float(changes[0] ** 2)
+            volatility_history = [np.sqrt(variance)]
+
+            for change in changes[1:]:
+                variance = decay * variance + (1.0 - decay) * float(change**2)
+                volatility_history.append(np.sqrt(max(variance, 0.0)))
+
+            current_volatility = volatility_history[-1]
+
+            threshold = float(np.quantile(
+                volatility_history[:-1],
+                percentile,
+            ))
+
+            regime_direction = 1 if current_volatility >= threshold else -1
+            votes += regime_direction * latest_direction
+
+        if votes > 0:
+            return limit
+
+        if votes < 0:
+            return -limit
+
+        return 0
+
+    def _boat_ticket_position_alt(self) -> int:
+        instrument = "Boat Party Ticket"
+        prices = np.asarray(self.data[instrument], dtype=float)
+        limit = self.positionLimits[instrument]
+
+        # Wait for enough live data to calculate rolling standard deviations
+        if len(prices) < 30:
+            return 0
+
+        # 1. Initialize the Seasonal Map and Stable Fair Value (Runs once)
+        if not hasattr(self, "_boat_seasonal_trend"):
+            hist_prices = self.get_seen_prices(instrument)
+            
+            smoothed = savgol_filter(
+                hist_prices, window_length=BOAT_WINDOW_LENGTH, polyorder=BOAT_POLYORDER
+            )
+
+            self._boat_seasonal_trend = smoothed
+
+            if not isinstance(smoothed, np.ndarray):
+                raise TypeError("Smoothed Trend is not NumPy array.")
+            
+            diffs = np.diff(smoothed, append=smoothed[0])
+            self._boat_slope_std = max(float(np.std(diffs)), 1e-12)
+            
+            self._boat_ewma = prices[-1]
+
+        current_price = prices[-1]
+        self._boat_ewma += BOAT_ALPHA * (current_price - self._boat_ewma)
+
+        day_of_year = self.day % 365
+        future_day = (day_of_year + BOAT_FORECAST_HORIZON) % 365
+        
+        forecasted_return = (
+            self._boat_seasonal_trend[future_day] 
+            - self._boat_seasonal_trend[day_of_year]
+        )
+
+        trend_score = forecasted_return / self._boat_slope_std
+
+        if trend_score >= BOAT_TREND_THRESHOLD:
+            return limit
+        
+        elif trend_score <= -BOAT_TREND_THRESHOLD:
+            return -limit
+
+        rolling_std = max(float(np.std(prices[-BOAT_WARMUP:])), 1e-12)
+        z_score = (current_price - self._boat_ewma) / rolling_std
+        
+        current_pos = self.positions.get(instrument, 0)
+        
+        if current_pos == 0:
+            if z_score >= BOAT_REVERT_THRESHOLD:
+                return -limit
+            
+            elif z_score <= -BOAT_REVERT_THRESHOLD:
+                return limit
+            
+            return 0
+            
+        elif current_pos * z_score > 0:
+            if abs(z_score) >= BOAT_REVERT_THRESHOLD:
+                return -current_pos
+            
+            return 0
+            
+        return current_pos
+
+    def _boat_ticket_position(self) -> int:
+        instrument = "Boat Party Ticket"
+        
+        boat_party_fv = self.seasonal_fair_values.get(
+            instrument, SeasonalFairValue(
+                prices=self.get_seen_prices(instrument), 
+                window_length=21, polyorder=8
+            )
+        )
+
+        model = SeasonalTrendModel(boat_party_fv.trend)
+
+        return self.trade(
+            instrument, trend=True, trend_model=model,
+            trend_threshold=1.0, forecast_horizon=3, trend_trust=80.0,
+            mean_revert=True, revert_fair_value=boat_party_fv,
+            revert_threshold=0.1, ou_trust=20.0
+        )
+
     def _load_data(self, instrument: str) -> np.ndarray:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         filepath = os.path.join(base_dir, "data", f"{instrument}_price_history.csv")
@@ -754,33 +963,12 @@ class Algorithm():
             desired_positions[instrument] = 0
 
         desired_positions["UQ Dollar"] = self._uq_dollar_position()
+        desired_positions["Fintech Token"] = self._fintech_token_position()
         desired_positions["Thrifted Jeans"] = self._thrifted_jeans_position()
         desired_positions["Bread"] = self._food_ema_position("Bread")
         desired_positions["Sausage"] = self._food_ema_position("Sausage")
-
-        desired_positions["Sausage Sizzle"] = self.trade_lagged_regression(
-            instrument="Sausage Sizzle", calib_window=14,
-            lead_instruments=["Sausage", "Bread", "Sausage Sizzle"],
-            lookback=1, z_threshold=0.0
-        )
-
+        desired_positions["Sausage Sizzle"] = self._sausage_sizzle_position()
         desired_positions["MenuDash"] = self._menudash_position()
-
-        boat_party_prices = self.get_seen_prices("Boat Party Ticket")
-
-        boat_party_fv = self.seasonal_fair_values.get(
-            "Boat Party Ticket", SeasonalFairValue(
-                prices=boat_party_prices, window_length=21, polyorder=8
-            )
-        )
-
-        model = SeasonalTrendModel(boat_party_fv.trend)
-
-        desired_positions["Boat Party Ticket"] = self.trade(
-            instrument="Boat Party Ticket", trend=True, trend_model=model,
-            trend_threshold=1.0, forecast_horizon=3, trend_trust=80.0,
-            mean_revert=True, revert_fair_value=boat_party_fv,
-            revert_threshold=0.1, ou_trust=50.0
-        )
+        desired_positions["Boat Party Ticket"] = self._boat_ticket_position()
 
         return self.scale_portfolio(desired_positions)
