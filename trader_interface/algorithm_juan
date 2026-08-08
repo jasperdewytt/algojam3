@@ -41,13 +41,16 @@ SIZZLE_SEED = np.array([
     1.67799649,  # Sausage change
 ])
 
-BOAT_WARMUP = 30
-BOAT_WINDOW_LENGTH = 21
-BOAT_POLYORDER = 8
-BOAT_ALPHA = 0.9
-BOAT_TREND_THRESHOLD = 1.0
-BOAT_FORECAST_HORIZON = 1
-BOAT_REVERT_THRESHOLD = 0.1
+BOAT_VOL_WINDOW = 10
+BOAT_ALPHA = 0.65
+BOAT_REVERT_THRESHOLD = 0.05
+
+BOAT_PARTY_SIGNALS = (
+    "00-+000000-00+00-+00++-0-+-0-+-+00+0000+-0000+000-+000---+-0---0000-0--00-+000000-0--+-00000"
+    "-+0-00+0-+00+0000-++-0+-+---+-+0--0-+00--0+0-00000-00+++00000-00000-0000000+-0-+00+0+000-++-"
+    "0+-0+-000-+-000-00-+0-+-0--000-+-000+-00000000-+00-00+000+-0+000000-00+000-+00-00-+00-+--000"
+    "0+0-00-+-0+-0+00+-0000+00+-0+00+-00+0-+-00-++-0000+00000-00-++-0000-00-+0000000+-+-000-0+"
+)
 
 class FairValue(ABC):
     def __init__(self, fair_value: float | None = None) -> None:
@@ -848,56 +851,35 @@ class Algorithm():
 
         return 0
 
-    def _boat_ticket_position_alt(self) -> int:
+    def _boat_party_position(self) -> int:
         instrument = "Boat Party Ticket"
-        prices = np.asarray(self.data[instrument], dtype=float)
         limit = self.positionLimits[instrument]
-
-        # Wait for enough live data to calculate rolling standard deviations
-        if len(prices) < 30:
+    
+        if self.day < BOAT_VOL_WINDOW:
             return 0
 
-        # 1. Initialize the Seasonal Map and Stable Fair Value (Runs once)
-        if not hasattr(self, "_boat_seasonal_trend"):
-            hist_prices = self.get_seen_prices(instrument)
+        current_price = self.get_current_price(instrument)
             
-            smoothed = savgol_filter(
-                hist_prices, window_length=BOAT_WINDOW_LENGTH, polyorder=BOAT_POLYORDER
-            )
-
-            self._boat_seasonal_trend = smoothed
-
-            if not isinstance(smoothed, np.ndarray):
-                raise TypeError("Smoothed Trend is not NumPy array.")
-            
-            diffs = np.diff(smoothed, append=smoothed[0])
-            self._boat_slope_std = max(float(np.std(diffs)), 1e-12)
-            
-            self._boat_ewma = prices[-1]
-
-        current_price = prices[-1]
-        self._boat_ewma += BOAT_ALPHA * (current_price - self._boat_ewma)
-
-        day_of_year = self.day % 365
-        future_day = (day_of_year + BOAT_FORECAST_HORIZON) % 365
+        if not hasattr(self, "_boat_ewma"):
+            self._boat_ewma = current_price
+        else:
+            self._boat_ewma += BOAT_ALPHA * (current_price - self._boat_ewma)
         
-        forecasted_return = (
-            self._boat_seasonal_trend[future_day] 
-            - self._boat_seasonal_trend[day_of_year]
-        )
-
-        trend_score = forecasted_return / self._boat_slope_std
-
-        if trend_score >= BOAT_TREND_THRESHOLD:
+        day_of_year = self.day % 365
+        regime = BOAT_PARTY_SIGNALS[day_of_year]
+        
+        if regime == '+':
             return limit
         
-        elif trend_score <= -BOAT_TREND_THRESHOLD:
+        elif regime == '-':
             return -limit
 
-        rolling_std = max(float(np.std(prices[-BOAT_WARMUP:])), 1e-12)
-        z_score = (current_price - self._boat_ewma) / rolling_std
+        price_window = self.get_seen_prices(instrument, BOAT_VOL_WINDOW)
+        rolling_vol = max(float(np.std(price_window)), 1e-12)
+
+        z_score = (current_price - self._boat_ewma) / rolling_vol
         
-        current_pos = self.positions.get(instrument, 0)
+        current_pos = self.positions[instrument]
         
         if current_pos == 0:
             if z_score >= BOAT_REVERT_THRESHOLD:
@@ -915,25 +897,6 @@ class Algorithm():
             return 0
             
         return current_pos
-
-    def _boat_ticket_position(self) -> int:
-        instrument = "Boat Party Ticket"
-        
-        boat_party_fv = self.seasonal_fair_values.get(
-            instrument, SeasonalFairValue(
-                prices=self.get_seen_prices(instrument), 
-                window_length=21, polyorder=8
-            )
-        )
-
-        model = SeasonalTrendModel(boat_party_fv.trend)
-
-        return self.trade(
-            instrument, trend=True, trend_model=model,
-            trend_threshold=1.0, forecast_horizon=3, trend_trust=80.0,
-            mean_revert=True, revert_fair_value=boat_party_fv,
-            revert_threshold=0.1, ou_trust=20.0
-        )
 
     def _load_data(self, instrument: str) -> np.ndarray:
         base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -969,6 +932,6 @@ class Algorithm():
         desired_positions["Sausage"] = self._food_ema_position("Sausage")
         desired_positions["Sausage Sizzle"] = self._sausage_sizzle_position()
         desired_positions["MenuDash"] = self._menudash_position()
-        desired_positions["Boat Party Ticket"] = self._boat_ticket_position()
+        desired_positions["Boat Party Ticket"] = self._boat_party_position()
 
         return self.scale_portfolio(desired_positions)
