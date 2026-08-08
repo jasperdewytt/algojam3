@@ -32,6 +32,18 @@ class Algorithm:
     )
     FINTECH_WARMUP = 30
 
+    BOAT_PARTY_SUMMER_FAIR_VALUE = 45.0
+
+    # Candidate D: fixed 5/7/11 majority signal for days 0..321.
+    # + = long limit, - = short limit, 0 = flat.
+    BOAT_PARTY_SEMESTER_SIGNALS = (
+        "0+00+++0+++++++++++++++++++-0+-++++++++++0+++++++++-------------------"
+        "---00--0-----------0-+0--00--+0+++++++++++++0---------------------0-0-"
+        "0-++++++++------------++++++++++++++++++++++++++++++++000-------------"
+        "----------0-0-0---------+++++++++++++++00++-0-----------------------++"
+        "+--++++++--------0-+-0+++++++++++++++++0-0"
+    )
+
     # FUNCTION TO SETUP ALGORITHM CLASS
     def __init__(self, positions):
         self.data = {}  # Historical data of all instruments
@@ -54,10 +66,11 @@ class Algorithm:
         desired_positions["UQ Dollar"] = self._uq_dollar_position()
         desired_positions["Sausage Sizzle"] = self._sausage_sizzle_position()
         desired_positions["Bread"] = self._food_ema_position("Bread")
-        desired_positions["Sausage"] = self._food_ema_position("Sausage")
+        # desired_positions["Sausage"] = self._food_ema_position("Sausage")
         desired_positions["MenuDash"] = self._menudash_position()
         desired_positions["Thrifted Jeans"] = self._thrifted_jeans_position()
         desired_positions["Fintech Token"] = self._fintech_token_position()
+        desired_positions["Boat Party Ticket"] = self._boat_party_position()
 
         return desired_positions
 
@@ -374,6 +387,38 @@ class Algorithm:
             return limit
 
         if votes < 0:
+            return -limit
+
+        return 0
+
+    def _boat_party_position(self):
+        prices = self.data["Boat Party Ticket"]
+        day = len(prices) - 1
+        limit = self.positionLimits["Boat Party Ticket"]
+
+        # There is no day-364-to-day-365 return.
+        if day >= 364:
+            return 0
+
+        # Fixed seasonal direction through day 321.
+        if day < len(self.BOAT_PARTY_SEMESTER_SIGNALS):
+            signal = self.BOAT_PARTY_SEMESTER_SIGNALS[day]
+
+            if signal == "+":
+                return limit
+
+            if signal == "-":
+                return -limit
+
+            return 0
+
+        # Summer mean reversion from day 322.
+        price = float(prices[-1])
+
+        if price < self.BOAT_PARTY_SUMMER_FAIR_VALUE:
+            return limit
+
+        if price > self.BOAT_PARTY_SUMMER_FAIR_VALUE:
             return -limit
 
         return 0
