@@ -25,6 +25,13 @@ class Algorithm:
     JEANS_INITIAL_SLOPE_VARIANCE = 1.0
     JEANS_SHORT_CONFIDENCE = 1.0
 
+    FINTECH_EWMA_CONFIGS = (
+        (0.85, 0.75),
+        (0.90, 0.80),
+        (0.95, 0.85),
+    )
+    FINTECH_WARMUP = 30
+
     # FUNCTION TO SETUP ALGORITHM CLASS
     def __init__(self, positions):
         self.data = {}  # Historical data of all instruments
@@ -50,6 +57,7 @@ class Algorithm:
         desired_positions["Sausage"] = self._food_ema_position("Sausage")
         desired_positions["MenuDash"] = self._menudash_position()
         desired_positions["Thrifted Jeans"] = self._thrifted_jeans_position()
+        desired_positions["Fintech Token"] = self._fintech_token_position()
 
         return desired_positions
 
@@ -315,3 +323,57 @@ class Algorithm:
             return -limit
 
         return limit
+
+    def _fintech_token_position(self):
+        prices = np.asarray(self.data["Fintech Token"], dtype=float)
+        limit = self.positionLimits["Fintech Token"]
+
+        # No previous move is available on day zero.
+        if len(prices) < 2:
+            return 0
+
+        changes = np.diff(prices)
+        latest_change = float(changes[-1])
+
+        if not np.isfinite(latest_change) or latest_change == 0:
+            return 0
+
+        latest_direction = int(np.sign(latest_change))
+
+        # Use the robust one-day reversal rule during startup.
+        if len(changes) <= self.FINTECH_WARMUP:
+            return -limit * latest_direction
+
+        votes = 0
+
+        for decay, percentile in self.FINTECH_EWMA_CONFIGS:
+            variance = float(changes[0] ** 2)
+            volatility_history = [np.sqrt(variance)]
+
+            # Reconstruct the causal EWMA through today's observed change.
+            for change in changes[1:]:
+                variance = decay * variance + (1.0 - decay) * float(change**2)
+                volatility_history.append(np.sqrt(max(variance, 0.0)))
+
+            current_volatility = volatility_history[-1]
+
+            # Exclude today's volatility from its own expanding threshold.
+            threshold = float(
+                np.quantile(
+                    volatility_history[:-1],
+                    percentile,
+                )
+            )
+
+            # Calm means reversal; volatile means momentum.
+            regime_direction = 1 if current_volatility >= threshold else -1
+
+            votes += regime_direction * latest_direction
+
+        if votes > 0:
+            return limit
+
+        if votes < 0:
+            return -limit
+
+        return 0
