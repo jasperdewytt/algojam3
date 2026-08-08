@@ -1,0 +1,786 @@
+from __future__ import annotations
+
+import os
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+import copy
+
+import numpy as np
+import pandas as pd
+from scipy.signal import savgol_filter
+from scipy.optimize import minimize
+
+DAILY_BUDGET = 600_000
+
+JEANS_Q_LEVEL = 0.5
+JEANS_Q_SLOPE = 0.05
+JEANS_OBSERVATION_VARIANCE = 5.0
+JEANS_INITIAL_SLOPE_VARIANCE = 1.0
+JEANS_SHORT_CONFIDENCE = 0.5
+JEANS_ALPHA = 0.06
+JEANS_TREND_THRESHOLD = 0.6
+JEANS_REVERT_THRESHOLD = 0.2
+
+MENUDASH_WARMUP = 60
+MENUDASH_MAPPING_WINDOWS = (60, 120, 240)
+FOOD_EMA_ALPHAS = (0.10, 0.15, 0.20)
+
+class FairValue(ABC):
+    def __init__(self, fair_value: float | None = None) -> None:
+        self.fair_value: float | None = fair_value
+        self.history: list[float] = []
+
+    @abstractmethod
+    def update(self, price: float) -> None: ...
+
+    def update_window(self, prices: np.ndarray) -> None:
+        for price in prices:
+            self.update(price)
+
+class SeasonalFairValue(FairValue):
+    def __init__(
+            self, prices: np.ndarray, window_length: int, 
+            polyorder: int) -> None:
+        
+        super().__init__()
+
+        self.trend = savgol_filter(prices, window_length, polyorder)
+        self.day: int = 0
+
+    def update(self, price: float) -> None:
+        if not isinstance(self.trend, np.ndarray):
+            raise ValueError("Smoothed trend is not NumPy array.")
+        
+        self.fair_value = self.trend[self.day]
+        self.history.append(self.fair_value or price)
+        self.day += 1
+
+        if self.day == 365:
+            self.day = 0
+
+@dataclass(slots=True, kw_only=True)
+class KalmanFilter:
+    x: np.ndarray
+    F: np.ndarray
+    H: np.ndarray
+    b: np.ndarray | None = field(default=None, init=False)
+
+    P: np.ndarray
+    Q: np.ndarray
+    R: np.ndarray
+
+    _last_S: np.ndarray | None = field(default=None, init=False, repr=False)
+
+    def _predict(self) -> None:
+        self.x = self.F @ self.x
+
+        if self.b is not None:
+            self.x += self.b
+
+        self.P = self.F @ self.P @ self.F.T + self.Q
+
+    def _update(self, observation: np.ndarray) -> np.ndarray:
+        innovation = observation - self.H @ self.x
+
+        S = self.H @ self.P @ self.H.T + self.R
+        self._last_S = S
+
+        K = self.P @ self.H.T @ np.linalg.solve(S, np.eye(len(S)))
+        self.x += K @ innovation
+
+        I = np.eye(len(self.x))
+
+        I_KH = I - K @ self.H
+        self.P = I_KH @ self.P @ I_KH.T + K @ self.R @ K.T
+
+        return innovation.squeeze()
+
+    def step(self, observation: np.ndarray) -> np.ndarray:
+        self._predict()
+        innovation = self._update(observation)
+
+        return innovation
+
+@dataclass(slots=True, kw_only=True)
+class OU(KalmanFilter):
+    fair_value_model: FairValue
+
+    @property
+    def stat_std(self) -> float:
+        q = self.Q.item()
+        phi = self.F.item()
+
+        return float(np.sqrt(q / (1 - phi**2)))
+
+    @classmethod
+    def from_prices(
+            cls, prices: np.ndarray, ou_trust: float, 
+            fair_value_model: FairValue) -> OU:
+
+        prices = np.asarray(prices, dtype=float)
+        fair_values = np.asarray(fair_value_model.history, dtype=float)
+
+        residuals = prices - fair_values
+        residuals = residuals[np.isfinite(residuals)]
+
+        if residuals.size < 5:
+            raise ValueError("Need at least 5 observations.")
+
+        r_prev, r_curr = residuals[:-1], residuals[1:]
+
+        X = np.column_stack([np.ones_like(r_prev), r_prev])
+        c, phi = np.linalg.lstsq(X, r_curr, rcond=None)[0]
+
+        phi = float(np.clip(phi, 0.01, 0.999))
+
+        state_residuals = r_curr - (c + phi * r_prev)
+        q = float(np.var(state_residuals, ddof=1))
+
+        if not np.isfinite(q) or q <= 1e-12:
+            q = max(float(np.var(residuals)) * 1e-4, 1e-8)
+
+        stat_var = q / (1.0 - phi**2)
+
+        p = np.clip(ou_trust, 0.0, 100.0) / 100.0
+        trust = 0.1 + (10.0 - 0.1) * p
+        r = q * trust
+
+        return cls(
+            fair_value_model=fair_value_model,
+            x=np.array([residuals[-1]], dtype=float),
+            F=np.array([[phi]], dtype=float),
+            H=np.array([[1.0]], dtype=float),
+            P=np.array([[stat_var]], dtype=float),
+            Q=np.array([[q]], dtype=float),
+            R=np.array([[r]], dtype=float),
+        )
+
+    def update(self, price: float) -> float:
+        self.fair_value_model.update(price)
+        fair = self.fair_value_model.fair_value or price
+        
+        residual = price - fair
+        innovation = self.step(np.array([residual]))
+
+        if self._last_S is None:
+            raise ValueError("Innovation covariance not available.")
+
+        return float(innovation) / self.stat_std
+
+class TrendModel(ABC):
+    @abstractmethod
+    def update(self, price: float, forecast_horizon: int) -> float: ...
+
+class SeasonalTrendModel(TrendModel):
+    def __init__(self, trend: np.ndarray) -> None:
+        self.trend = trend
+        self.slope_std = max(np.std(np.diff(trend)), 1e-8)
+
+        self.day = 0
+
+    def update(self, price: float, forecast_horizon: int) -> float:
+        future_index = min(self.day + forecast_horizon, len(self.trend) - 1)
+        forecast = self.trend[future_index]
+
+        expected_return = forecast - price
+        score = expected_return / self.slope_std
+
+        self.day += 1
+
+        return score
+
+class MultiEMATrendModel(TrendModel):
+    def __init__(self, alphas: tuple[float, ...]) -> None:
+        self.alphas = alphas
+        self.emas: dict[float, float] = {}
+
+    def update(self, price: float, forecast_horizon: int) -> float:
+        votes = 0
+
+        for alpha in self.alphas:
+            ema = self.emas.get(alpha, price)
+
+            difference = price - ema
+            votes += int(np.sign(difference))
+
+            ema += alpha * difference
+            self.emas[alpha] = ema
+                
+        return float(votes)
+
+class LocalLinearTrend(KalmanFilter, TrendModel):
+    def forecast(self, horizon: int) -> float:
+        return float(self.x[0]) + horizon * float(self.x[1])
+
+    def forecast_std(self, horizon: int) -> float:
+        P = self.P.copy()
+
+        for _ in range(horizon):
+            P = self.F @ P @ self.F.T + self.Q
+
+        variance = (self.H @ P @ self.H.T).item()
+        
+        return float(np.sqrt(variance))
+
+    @classmethod
+    def _build(
+            cls, level: float, trend: float, q_level: float, q_trend: float,
+            r: float, p_level: float, p_trend) -> LocalLinearTrend:
+        
+        return cls(
+            x=np.array([level, trend]),
+            F=np.array([[1.0, 1.0], [0.0, 1.0]]),
+            H=np.array([[1.0, 0.0]]),
+            P=np.array([[p_level, 0.0], [0.0, p_trend]]),
+            Q=np.array([[q_level, 0.0], [0.0, q_trend]]),
+            R=np.array([[r]]),
+        )
+
+    @classmethod
+    def from_prices(
+            cls, prices: np.ndarray, trend_trust: float) -> LocalLinearTrend:
+
+        y = prices[np.isfinite(prices)].astype(float)
+        y_var = float(np.var(y))
+
+        dy = np.diff(y)
+        dy_var = float(np.var(dy))
+
+        level = float(y[0])
+        trend = float(np.mean(dy[:5])) 
+
+        log_bounds = [
+            (np.log(y_var * 1e-5), np.log(y_var * 1e-1)),
+            (np.log(y_var * 1e-4), np.log(y_var * 1e2)),
+            (np.log(y_var * 1e-3), np.log(y_var * 1e2)),
+        ]
+
+        def negative_log_likelihood(log_params: np.ndarray) -> float:
+            q_level, q_trend, r = np.exp(log_params)
+
+            for val, (lower, upper) in zip(log_params, log_bounds):
+                if val < lower or val > upper:
+                    return 1e10
+
+            kalman_filter = cls._build(
+                level, trend, q_level, q_trend, r, y_var, dy_var
+            )
+
+            log_likelihood = 0.0
+
+            for price in y:
+                innovation = kalman_filter.step(np.array([price]))
+
+                if kalman_filter._last_S is None:
+                    raise ValueError("Kalman Filter S is None.")
+            
+                S = kalman_filter._last_S.item()
+
+                if S <= 0 or not np.isfinite(S):
+                    return 1e10
+
+                log_likelihood -= 0.5 * (
+                    np.log(2 * np.pi * S) + float(innovation)**2 / S
+                )
+                
+            return -log_likelihood
+
+        x0 = np.log([y_var * 0.01, y_var * 0.001, y_var * 0.1])
+
+        result = minimize(
+            negative_log_likelihood, x0, 
+            method="Nelder-Mead", bounds=log_bounds
+        )
+
+        q_level, q_trend, r = np.exp(result.x)
+
+        fraction = max(0, min(100, trend_trust)) / 100.0
+        trust = 1e8 if fraction >= 1.0 else 0.1 + (10.0 - 0.1) * fraction
+
+        p_level = y_var * trust
+        p_trend = dy_var * trust
+
+        kalman_filter = cls._build(
+            level, trend, q_level, q_trend, r, p_level, p_trend
+        )
+
+        for price in y:
+            kalman_filter.step(np.array([price]))
+
+        return kalman_filter
+
+    def update(self, price: float, forecast_horizon: int) -> float:
+        self.step(np.array([price]))
+
+        trend_std = float(np.sqrt(self.P[1, 1]))
+        
+        if trend_std <= 0:
+            return 0.0
+        
+        return float(self.x[1]) / trend_std
+
+class UnifiedModel:
+    def __init__(
+            self, trend_model: TrendModel | None, 
+            revert_model: OU | None) -> None:
+        
+        self.trend_model = trend_model
+        self.revert_model = revert_model
+
+    def update(self, price: float, forecast_horizon: int) -> tuple[float, float]:
+        trend_score = 0.0
+        revert_z = 0.0
+
+        if self.trend_model is not None:
+            trend_score = self.trend_model.update(price, forecast_horizon)
+
+        if self.revert_model is not None:
+            revert_z = self.revert_model.update(price)
+
+        return trend_score, revert_z
+
+class LeadLag:
+    def __init__(
+            self, coefficients: np.ndarray, intercept: float, 
+            residual_std: float) -> None:
+        
+        self.coefficients = coefficients
+        self.intercept = intercept
+        self.residual_std = residual_std
+
+    @classmethod
+    def from_prices(
+            cls, asset_price: np.ndarray, lead_prices: np.ndarray,
+            lookback: int) -> LeadLag:
+
+        asset_returns = np.diff(asset_price)
+        lead_returns = np.diff(lead_prices, axis=1)
+
+        n_leads = lead_prices.shape[0]
+        n_samples = len(asset_returns) - lookback
+
+        X = np.empty((n_samples, n_leads, lookback))
+        y = np.empty(n_samples)
+
+        for sample in range(n_samples):
+            t = sample + lookback
+
+            y[sample] = asset_returns[t]
+            X[sample] = lead_returns[:, t-lookback:t][:, ::-1]
+
+        X_flat = X.reshape(n_samples, -1)
+
+        X_design = np.empty((n_samples, X_flat.shape[1] + 1))
+        X_design[:, 0] = 1.0
+        X_design[:, 1:] = X_flat
+
+        coeffs, *_ = np.linalg.lstsq(X_design, y, rcond=None)
+
+        prediction = X_design @ coeffs
+        residuals = y - prediction
+
+        intercept = float(coeffs[0])
+        coefficients = coeffs[1:].reshape(n_leads, lookback)
+        residual_std = max(float(np.std(residuals)), 1e-8)
+
+        return cls(
+            coefficients=coefficients, intercept=intercept, 
+            residual_std=residual_std
+        )
+
+    def predict(self, lagged_returns: np.ndarray) -> float:
+        return self.intercept + np.sum(self.coefficients * lagged_returns)
+
+    def update(self, lagged_returns: np.ndarray) -> float:
+        prediction = self.predict(lagged_returns)
+        return prediction / self.residual_std
+        
+class Algorithm():
+    def __init__(self, positions):
+        self.data = {}  
+        self.positionLimits = {}  
+        self.day = 0     
+        self.positions = positions 
+
+        self.models = {}
+        self.price_data = {}
+        self.seasonal_fair_values = {}
+
+    def scale_portfolio(self, positions: dict[str, int]) -> dict[str, int]:
+        exposure = 0.0
+
+        for instrument, position in positions.items():
+            price = self.get_current_price(instrument)
+            exposure += abs(position) * price
+
+        if exposure <= DAILY_BUDGET:
+            return positions
+
+        scale = DAILY_BUDGET / exposure
+        scaled = {}
+
+        for instrument, position in positions.items():
+            scaled[instrument] = int(position * scale)
+
+        return scaled
+
+    def trade_lagged_regression(
+            self, instrument: str, lead_instruments: list[str],
+            lookback: int, z_threshold: float,
+            calib_window: int = 365) -> int:
+
+        calib_window = max(calib_window, lookback + 1)
+
+        if self.day < calib_window:
+            return 0
+
+        elif instrument not in self.models:
+            lead_prices = np.empty((len(lead_instruments), calib_window))
+
+            for i, asset in enumerate(lead_instruments):
+                lead_prices[i] = self.get_seen_prices(asset, -calib_window)
+
+            asset_price = self.get_seen_prices(instrument, -calib_window)
+
+            self.models[instrument] = LeadLag.from_prices(
+                asset_price=asset_price, lead_prices=lead_prices,
+                lookback=lookback
+            )
+
+            return 0
+
+        lagged_returns = np.empty((len(lead_instruments), lookback))
+
+        for i, asset in enumerate(lead_instruments):
+            prices = self.get_seen_prices(asset, lookback + 1)
+            lagged_returns[i] = np.diff(prices)[::-1]
+
+        max_pos = self.positionLimits[instrument]
+
+        model: LeadLag = self.models[instrument]
+        z = model.update(lagged_returns)
+
+        if abs(z) < z_threshold:
+            return 0
+        
+        return max_pos if z > 0 else -max_pos
+
+    def trade(
+            self, instrument: str, calib_window: int = 0, 
+            trend: bool = False, trend_model: TrendModel | None = None,
+            trend_threshold: float = 1.0, forecast_horizon: int = 1, 
+            trend_trust: float = 50.0, mean_revert: bool = False, 
+            revert_fair_value: FairValue | None = None, 
+            revert_threshold: float = 1.0, ou_trust: float = 50.0) -> int:
+
+        if not (trend or mean_revert):
+            raise ValueError(
+                "At least one of trend or mean_revert must be True."
+            )
+
+        if self.day < calib_window:
+            return 0
+
+        if instrument not in self.models:
+            prices = self.get_seen_prices(instrument, calib_window)
+
+            if trend and trend_model is None:
+                trend_model = LocalLinearTrend.from_prices(
+                    prices, trend_trust
+                )
+
+            revert_model = None
+
+            if mean_revert:
+                if revert_fair_value is None:
+                    raise ValueError(
+                        "fair_value_model required for mean reversion."
+                    )
+
+                fair_value_model = copy.deepcopy(revert_fair_value)
+                fair_value_model.update_window(prices)
+
+                revert_model = OU.from_prices(
+                    prices, ou_trust, fair_value_model
+                )
+
+            self.models[instrument] = UnifiedModel(trend_model, revert_model)
+
+            return 0
+
+        price = self.get_current_price(instrument)
+
+        model: UnifiedModel = self.models[instrument]
+        trend_score, ou_z = model.update(price, forecast_horizon)
+
+        current_pos = self.positions[instrument]
+        max_pos = self.positionLimits[instrument]
+
+        if trend and abs(trend_score) >= trend_threshold: 
+            return max_pos if trend_score > 0 else -max_pos
+
+        elif mean_revert:
+            if current_pos == 0:
+                if ou_z >= revert_threshold:
+                    return -max_pos
+                
+                elif ou_z <= -revert_threshold:
+                    return max_pos
+                
+            elif current_pos * ou_z > 0:
+                if abs(ou_z) >= revert_threshold:
+                    return -current_pos
+                
+                return 0
+
+        return current_pos
+
+    def _thrifted_jeans_position(self):
+        prices = np.asarray(self.data["Thrifted Jeans"], dtype=float)
+        limit = self.positionLimits["Thrifted Jeans"]
+
+        if self.day == 0:
+            return 0
+
+        transition = np.array([[1.0, 1.0], [0.0, 1.0]])
+        process_covariance = np.diag([JEANS_Q_LEVEL, JEANS_Q_SLOPE])
+        observation_vector = np.array([1.0, 0.0])
+
+        state = np.array([prices[0], 0.0])
+
+        covariance = np.diag([
+            JEANS_OBSERVATION_VARIANCE,
+            JEANS_INITIAL_SLOPE_VARIANCE,
+        ])
+
+        for day, price in enumerate(prices):
+            if day > 0:
+                state = transition @ state
+                covariance = (
+                    transition @ covariance @ transition.T + process_covariance
+                )
+
+            innovation = price - float(observation_vector @ state)
+
+            innovation_variance = (
+                float(observation_vector @ covariance @ observation_vector)
+                + JEANS_OBSERVATION_VARIANCE
+            )
+
+            gain = (
+                covariance @ observation_vector
+                / max(innovation_variance, 1e-12)
+            )
+
+            state += gain * innovation
+            covariance = covariance - np.outer(
+                gain, observation_vector @ covariance
+            )
+
+            covariance = (covariance + covariance.T) / 2.0
+
+        estimated_slope = float(state[1])
+        slope_uncertainty = np.sqrt(max(float(covariance[1, 1]), 0.0))
+        trend_strength = abs(estimated_slope) / max(slope_uncertainty, 1e-12)
+
+        if trend_strength >= JEANS_TREND_THRESHOLD:
+            if estimated_slope < -JEANS_SHORT_CONFIDENCE * slope_uncertainty:
+                return -limit
+
+            return limit
+
+        fair_value = prices[0]
+
+        for p in prices[1:]:
+            fair_value += JEANS_ALPHA * (p - fair_value)
+
+        residuals = prices - fair_value
+        res_std = max(float(np.std(residuals)), 1e-12)
+
+        z_score = (prices[-1] - fair_value) / res_std
+        current_pos = self.positions["Thrifted Jeans"]
+
+        if current_pos == 0:
+            if z_score >= JEANS_REVERT_THRESHOLD:
+                return -limit
+            
+            elif z_score <= -JEANS_REVERT_THRESHOLD:
+                return limit
+            
+            return 0
+        
+        elif current_pos * z_score > 0:
+            if abs(z_score) >= JEANS_REVERT_THRESHOLD:
+                return -current_pos
+            
+            return 0
+        
+        return current_pos
+
+    def _uq_dollar_position(self):
+        price = self.data["UQ Dollar"][-1]
+        limit = self.positionLimits["UQ Dollar"]
+
+        if price > 100.0:
+            return -limit
+
+        if price < 100.0:
+            return limit
+
+        return 0
+
+    def _menudash_position(self):
+        menu = np.asarray(self.data["MenuDash"], dtype=float)
+        sizzle = np.asarray(self.data["Sausage Sizzle"], dtype=float)
+        bread = np.asarray(self.data["Bread"], dtype=float)
+        sausage = np.asarray(self.data["Sausage"], dtype=float)
+
+        day = len(menu) - 1
+        limit = self.positionLimits["MenuDash"]
+
+        if day < MENUDASH_WARMUP:
+            return 0
+
+        observation_days = np.arange(1, day)
+
+        change_design = np.column_stack([
+            np.ones(len(observation_days)),
+            bread[observation_days] - bread[observation_days - 1],
+            sausage[observation_days] - sausage[observation_days - 1],
+        ])
+
+        change_targets = sizzle[observation_days + 1] - sizzle[observation_days]
+
+        ingredient_coefficients, *_ = np.linalg.lstsq(
+            change_design, change_targets, rcond=None,
+        )
+
+        bread_loading = ingredient_coefficients[1]
+        sausage_loading = ingredient_coefficients[2]
+
+        labour_sensor = (
+            sizzle[1 : day + 1]
+            - bread_loading * bread[:day]
+            - sausage_loading * sausage[:day]
+        )
+
+        menu_targets = menu[:day]
+        latest_sensor = labour_sensor[-1]
+
+        votes = 0
+
+        for mapping_window in MENUDASH_MAPPING_WINDOWS:
+            sensor_history = labour_sensor
+            target_history = menu_targets
+
+            if mapping_window is not None:
+                sensor_history = sensor_history[-mapping_window:]
+                target_history = target_history[-mapping_window:]
+
+            mapping_design = np.column_stack([
+                np.ones(len(sensor_history)),
+                sensor_history,
+            ])
+
+            mapping_coefficients, *_ = np.linalg.lstsq(
+                mapping_design, target_history, rcond=None,
+            )
+
+            fair_value = float(
+                mapping_coefficients @ np.array([1.0, latest_sensor])
+            )
+
+            votes += int(np.sign(fair_value - menu[day]))
+
+        if votes > 0:
+            return limit
+
+        if votes < 0:
+            return -limit
+
+        return 0
+
+    def _food_ema_position(self, instrument):
+        prices = np.asarray(self.data[instrument], dtype=float)
+
+        if len(prices) < 2:
+            return 0
+
+        votes = 0
+
+        for alpha in FOOD_EMA_ALPHAS:
+            level = prices[0]
+
+            for historical_price in prices[1:-1]:
+                level = alpha * historical_price + (1.0 - alpha) * level
+
+            votes += int(np.sign(prices[-1] - level))
+
+        limit = self.positionLimits[instrument]
+
+        if votes > 0:
+            return limit
+
+        if votes < 0:
+            return -limit
+
+        return 0
+
+    def _load_data(self, instrument: str) -> np.ndarray:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        filepath = os.path.join(base_dir, "data", f"{instrument}_price_history.csv")
+        return pd.read_csv(filepath, index_col=0)["Price"].to_numpy()
+
+    def get_seen_prices(self, instrument: str, window: int = 0) -> np.ndarray:
+        if window > 0:
+            return np.asarray(self.data[instrument][-window:])
+        
+        prices = self.price_data.get(instrument, self._load_data(instrument))
+
+        if window == 0:
+            return prices
+
+        return prices[window:]
+
+    def get_current_price(self, instrument: str) -> float:
+        return self.data[instrument][-1]
+    
+    def get_positions(self):
+        position_limits = self.positionLimits
+
+        desired_positions = {}
+
+        for instrument, _ in position_limits.items():
+            desired_positions[instrument] = 0
+
+        desired_positions["UQ Dollar"] = self._uq_dollar_position()
+        desired_positions["Thrifted Jeans"] = self._thrifted_jeans_position()
+        desired_positions["Bread"] = self._food_ema_position("Bread")
+        desired_positions["Sausage"] = self._food_ema_position("Sausage")
+
+        desired_positions["Sausage Sizzle"] = self.trade_lagged_regression(
+            instrument="Sausage Sizzle", calib_window=14,
+            lead_instruments=["Sausage", "Bread", "Sausage Sizzle"],
+            lookback=1, z_threshold=0.0
+        )
+
+        desired_positions["MenuDash"] = self._menudash_position()
+
+        boat_party_prices = self.get_seen_prices("Boat Party Ticket")
+
+        boat_party_fv = self.seasonal_fair_values.get(
+            "Boat Party Ticket", SeasonalFairValue(
+                prices=boat_party_prices, window_length=21, polyorder=8
+            )
+        )
+
+        model = SeasonalTrendModel(boat_party_fv.trend)
+
+        desired_positions["Boat Party Ticket"] = self.trade(
+            instrument="Boat Party Ticket", trend=True, trend_model=model,
+            trend_threshold=1.0, forecast_horizon=3, trend_trust=80.0,
+            mean_revert=True, revert_fair_value=boat_party_fv,
+            revert_threshold=0.1, ou_trust=50.0
+        )
+
+        return self.scale_portfolio(desired_positions)
