@@ -19,6 +19,12 @@ class Algorithm:
     MENUDASH_WARMUP = 30
     MENUDASH_MAPPING_WINDOWS = (None, 60, 120)
 
+    JEANS_Q_LEVEL = 1.0
+    JEANS_Q_SLOPE = 0.05
+    JEANS_OBSERVATION_VARIANCE = 9.0
+    JEANS_INITIAL_SLOPE_VARIANCE = 1.0
+    JEANS_SHORT_CONFIDENCE = 1.0
+
     # FUNCTION TO SETUP ALGORITHM CLASS
     def __init__(self, positions):
         self.data = {}  # Historical data of all instruments
@@ -43,6 +49,7 @@ class Algorithm:
         desired_positions["Bread"] = self._food_ema_position("Bread")
         desired_positions["Sausage"] = self._food_ema_position("Sausage")
         desired_positions["MenuDash"] = self._menudash_position()
+        desired_positions["Thrifted Jeans"] = self._thrifted_jeans_position()
 
         return desired_positions
 
@@ -238,3 +245,73 @@ class Algorithm:
             return -limit
 
         return 0
+
+    def _thrifted_jeans_position(self):
+        prices = np.asarray(self.data["Thrifted Jeans"], dtype=float)
+        limit = self.positionLimits["Thrifted Jeans"]
+
+        # Stay flat on day zero while no price movement has been observed.
+        if len(prices) < 2:
+            return 0
+
+        transition = np.array(
+            [
+                [1.0, 1.0],
+                [0.0, 1.0],
+            ]
+        )
+        process_covariance = np.diag(
+            [
+                self.JEANS_Q_LEVEL,
+                self.JEANS_Q_SLOPE,
+            ]
+        )
+        observation_vector = np.array([1.0, 0.0])
+
+        # State contains the estimated price level and daily slope.
+        state = np.array([prices[0], 0.0])
+        covariance = np.diag(
+            [
+                self.JEANS_OBSERVATION_VARIANCE,
+                self.JEANS_INITIAL_SLOPE_VARIANCE,
+            ]
+        )
+
+        # Reconstruct the causal filter using prices available through today.
+        for day, price in enumerate(prices):
+            if day > 0:
+                state = transition @ state
+                covariance = (
+                    transition @ covariance @ transition.T + process_covariance
+                )
+
+            innovation = price - float(observation_vector @ state)
+            innovation_variance = (
+                float(observation_vector @ covariance @ observation_vector)
+                + self.JEANS_OBSERVATION_VARIANCE
+            )
+
+            gain = (
+                covariance
+                @ observation_vector
+                / max(innovation_variance, 1e-12)
+            )
+
+            state = state + gain * innovation
+            covariance = covariance - np.outer(
+                gain,
+                observation_vector @ covariance,
+            )
+
+            # Limit small numerical asymmetry.
+            covariance = (covariance + covariance.T) / 2.0
+
+        estimated_slope = float(state[1])
+        slope_uncertainty = np.sqrt(max(float(covariance[1, 1]), 0.0))
+
+        # Retain the positive-drift position unless there is sufficiently
+        # strong evidence of a persistent negative regime.
+        if estimated_slope < -self.JEANS_SHORT_CONFIDENCE * slope_uncertainty:
+            return -limit
+
+        return limit
