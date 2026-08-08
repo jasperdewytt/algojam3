@@ -1,0 +1,35 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local environment and tool state
+.env
+.env.*
+!.env.example
+.coverage
+htmlcov/
+
+# Generated research and simulation artifacts
+tmp/
+trader_interface/simulation_results/
+*.log
+
+# Jupyter temporary files
+.ipynb_checkpoints/
+
+# IDE and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
