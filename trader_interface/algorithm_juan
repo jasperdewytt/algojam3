@@ -2,38 +2,36 @@ import numpy as np
 
 DAILY_BUDGET = 600_000
 
+BUDGET_TRIM_ORDER = (
+    "Bread",
+    "Sausage",
+    "Sausage Sizzle",
+    "MenuDash",
+    "UQ Dollar",
+    "Thrifted Jeans",
+    "Fintech Token",
+    "Boat Party Ticket",
+    "Liferaft Ticket",
+)
+
 UQ_FAIR_VALUE = 100.0
 
-FINTECH_WARMUP = 30
+FINTECH_WARMUP = 20
 FINTECH_EWMA_CONFIGS = (
     (0.85, 0.75),
     (0.90, 0.80),
     (0.75, 0.95),
 )
 
-JEANS_Q_LEVEL = 0.47
-JEANS_Q_SLOPE = 0.04
-JEANS_OBSERVATION_VARIANCE = 10.0
-JEANS_INITIAL_SLOPE_VARIANCE = 4.0
-JEANS_SHORT_CONFIDENCE = 0.4
-JEANS_ALPHA = 0.09
-JEANS_VOL_WINDOW = 14
-JEANS_TREND_THRESHOLD = 0.9
-JEANS_REVERT_THRESHOLD = 0.2
-
-BREAD_Q_LEVEL = 0.66
-BREAD_Q_SLOPE = 0.04
-BREAD_OBSERVATION_VARIANCE = 8.0
-BREAD_INITIAL_SLOPE_VARIANCE = 4.0
-BREAD_SHORT_CONFIDENCE = 0.3
-BREAD_ALPHA = 0.03
-BREAD_VOL_WINDOW = 14
-BREAD_TREND_THRESHOLD = 0.1
-BREAD_REVERT_THRESHOLD = 0.1
+JEANS_Q_LEVEL = 0.5
+JEANS_Q_SLOPE = 0.05
+JEANS_OBSERVATION_VARIANCE = 5.0
+JEANS_INITIAL_SLOPE_VARIANCE = 1.0
+JEANS_SHORT_CONFIDENCE = 0.6
 
 FOOD_EMA_ALPHAS = (0.10, 0.15, 0.20)
 
-MENUDASH_WARMUP = 55
+MENUDASH_WARMUP = 20
 MENUDASH_MAPPING_WINDOWS = (20, 60, 120)
 
 SIZZLE_WINDOW = 15
@@ -45,7 +43,7 @@ SIZZLE_SEED = np.array([
 
 BOAT_VOL_WINDOW = 7
 BOAT_ALPHA = 0.65
-BOAT_REVERT_THRESHOLD = 0.1
+BOAT_REVERT_THRESHOLD = 0.05
 BOAT_SUMMER_FAIR_VALUE = 45.0
 
 BOAT_PARTY_SIGNALS = (
@@ -65,37 +63,55 @@ class Algorithm():
         self.day = 0     
         self.positions = positions 
 
-    def scale_portfolio(self, positions: dict[str, int]) -> dict[str, int]:
-        exposure = 0.0
+    def _apply_budget(self, desired_positions: dict[str, int]) -> dict[str, int]:
+        adjusted = desired_positions
 
-        for instrument, position in positions.items():
-            price = self.get_current_price(instrument)
-            exposure += abs(position) * price
+        prices = {
+            instrument: float(self.data[instrument][-1])
+            for instrument in adjusted
+        }
+        gross_value = sum(
+            abs(position * prices[instrument])
+            for instrument, position in adjusted.items()
+        )
 
-        if exposure <= DAILY_BUDGET:
-            return positions
+        if gross_value <= DAILY_BUDGET:
+            return adjusted
 
-        # if positions["Sausage"] != 0:
-        #     positions["Sausage"] = 0
+        trim_order = BUDGET_TRIM_ORDER + tuple(
+            instrument
+            for instrument in adjusted
+            if instrument not in BUDGET_TRIM_ORDER
+        )
 
-        #     return self.scale_portfolio(positions)
+        for instrument in trim_order:
+            if instrument not in adjusted:
+                continue
 
-        scale = DAILY_BUDGET / exposure
-        scaled = {}
+            position = adjusted[instrument]
+            unit_value = abs(prices[instrument])
 
-        for instrument, position in positions.items():
-            scaled[instrument] = int(position * scale)
+            if position == 0 or not np.isfinite(unit_value) or unit_value <= 0:
+                continue
 
-        return scaled
+            excess = gross_value - DAILY_BUDGET
+            if excess <= 0:
+                break
+
+            units_to_trim = min(
+                abs(position),
+                max(1, int(np.ceil(excess / unit_value))),
+            )
+
+            adjusted[instrument] = int(
+                position - np.sign(position) * units_to_trim
+            )
+
+            gross_value -= units_to_trim * unit_value
+
+        return adjusted
 
     def _thrifted_jeans_position(self) -> int:
-        price = self.get_current_price("Thrifted Jeans")
-
-        if not hasattr(self, "_jeans_ewma") or self.day == 0:
-            self._jeans_ewma = price
-        else:
-            self._jeans_ewma += JEANS_ALPHA * (price - self._jeans_ewma)
-            
         if self.day == 0:
             return 0
         
@@ -140,41 +156,13 @@ class Algorithm():
 
         estimated_slope = float(state[1])
         slope_uncertainty = np.sqrt(max(float(covariance[1, 1]), 0.0))
-        trend_strength = abs(estimated_slope) / max(slope_uncertainty, 1e-12)
 
         limit = self.positionLimits["Thrifted Jeans"]
 
-        if trend_strength >= JEANS_TREND_THRESHOLD:
-            if estimated_slope < -JEANS_SHORT_CONFIDENCE * slope_uncertainty:
-                return -limit
+        if estimated_slope < -JEANS_SHORT_CONFIDENCE * slope_uncertainty:
+            return -limit
 
-            return limit
-
-        if self.day < JEANS_VOL_WINDOW:
-            return limit
-
-        price_window = prices[-JEANS_VOL_WINDOW:]
-        rolling_std = max(float(np.std(price_window)), 1e-12)
-        z_score = (price - self._jeans_ewma) / rolling_std
-
-        current_pos = self.positions["Thrifted Jeans"]
-
-        if current_pos == 0:
-            if z_score >= JEANS_REVERT_THRESHOLD:
-                return -limit
-            
-            if z_score <= -JEANS_REVERT_THRESHOLD:
-                return limit
-            
-            return 0
-        
-        elif current_pos * z_score > 0:
-            if abs(z_score) >= JEANS_REVERT_THRESHOLD:
-                return -current_pos
-            
-            return 0
-        
-        return current_pos
+        return limit
 
     def _uq_dollar_position(self) -> int:
         price = self.get_current_price("UQ Dollar")
@@ -308,87 +296,7 @@ class Algorithm():
             return -limit
 
         return 0
-
-    def _bread_position(self) -> int:
-        price = self.get_current_price("Bread")
-
-        if not hasattr(self, "_bread_ewma") or self.day == 0:
-            self._bread_ewma = price
-        else:
-            self._bread_ewma += BREAD_ALPHA * (price - self._bread_ewma)
-
-        if self.day == 0:
-            return 0
-
-        prices = self.get_seen_prices("Bread")
-
-        transition = np.array([[1.0, 1.0], [0.0, 1.0]])
-        process_covariance = np.diag([BREAD_Q_LEVEL, BREAD_Q_SLOPE])
-        observation_vector = np.array([1.0, 0.0])
-
-        state = np.array([prices[0], 0.0])
-        covariance = np.diag(
-            [BREAD_OBSERVATION_VARIANCE, BREAD_INITIAL_SLOPE_VARIANCE]
-        )
-
-        for day, price in enumerate(prices):
-            if day > 0:
-                state = transition @ state
-                covariance = (
-                    transition @ covariance @ transition.T 
-                    + process_covariance
-                )
-
-            innovation = price - float(observation_vector @ state)
-
-            innovation_variance = (
-                float(observation_vector @ covariance @ observation_vector) 
-                + BREAD_OBSERVATION_VARIANCE
-            )
-
-            gain = (
-                covariance @ observation_vector 
-                / max(innovation_variance, 1e-12)
-            )
-
-            state += gain * innovation
-
-            covariance = (
-                covariance - np.outer(gain, observation_vector @ covariance)
-            )
-
-            covariance = (covariance + covariance.T) / 2.0
-
-        estimated_slope = float(state[1])
-        slope_uncertainty = np.sqrt(max(float(covariance[1, 1]), 0.0))
-        trend_strength = abs(estimated_slope) / max(slope_uncertainty, 1e-12)
-
-        limit = self.positionLimits["Bread"]
-
-        if trend_strength >= BREAD_TREND_THRESHOLD:
-            short = estimated_slope < -BREAD_SHORT_CONFIDENCE * slope_uncertainty
-            return -limit if short else limit
-
-        if self.day < BREAD_VOL_WINDOW:
-            return limit
-
-        price_window = prices[-BREAD_VOL_WINDOW:]
-        rolling_std = max(float(np.std(price_window)), 1e-12)
-        z_score = (prices[-1] - self._bread_ewma) / rolling_std
-
-        current_pos = self.positions["Bread"]
-        
-        if current_pos == 0 and abs(z_score) >= BREAD_REVERT_THRESHOLD:
-            return -limit if z_score > 0 else limit
-            
-        elif current_pos * z_score > 0:
-            if abs(z_score) >= BREAD_REVERT_THRESHOLD:
-                return -current_pos
-            
-            return 0
-
-        return current_pos
-
+    
     def _fintech_token_position(self) -> int:
         if self.day == 0:
             return 0
@@ -491,7 +399,7 @@ class Algorithm():
             
         return current_pos
 
-    def _sausage_position(self, instrument = "Sausage"):
+    def _food_position(self, instrument: str) -> int:
         price = self.get_current_price(instrument)
 
         if not hasattr(self, "_food_emas"):
@@ -537,20 +445,18 @@ class Algorithm():
         return self.data[instrument][-1]
     
     def get_positions(self) -> dict[str, int]:
-        position_limits = self.positionLimits
-
         desired_positions = {}
 
-        for instrument, _ in position_limits.items():
+        for instrument, _ in self.positionLimits.items():
             desired_positions[instrument] = 0
 
         desired_positions["UQ Dollar"] = self._uq_dollar_position()
         desired_positions["Fintech Token"] = self._fintech_token_position()
         desired_positions["Thrifted Jeans"] = self._thrifted_jeans_position()
-        desired_positions["Bread"] = self._bread_position()
-        desired_positions["Sausage"] = self._sausage_position()
+        desired_positions["Bread"] = self._food_position("Bread")
+        desired_positions["Sausage"] = self._food_position("Sausage")
         desired_positions["Sausage Sizzle"] = self._sausage_sizzle_position()
         desired_positions["MenuDash"] = self._menudash_position()
         desired_positions["Boat Party Ticket"] = self._boat_party_position()
 
-        return self.scale_portfolio(desired_positions)
+        return self._apply_budget(desired_positions)
