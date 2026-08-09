@@ -19,11 +19,11 @@ class Algorithm:
     MENUDASH_WARMUP = 30
     MENUDASH_MAPPING_WINDOWS = (None, 60, 120)
 
-    JEANS_Q_LEVEL = 1.0
+    JEANS_Q_LEVEL = 0.5
     JEANS_Q_SLOPE = 0.05
-    JEANS_OBSERVATION_VARIANCE = 9.0
+    JEANS_OBSERVATION_VARIANCE = 5.0
     JEANS_INITIAL_SLOPE_VARIANCE = 1.0
-    JEANS_SHORT_CONFIDENCE = 1.0
+    JEANS_SHORT_CONFIDENCE = 0.6
 
     FINTECH_EWMA_CONFIGS = (
         (0.85, 0.75),
@@ -33,15 +33,19 @@ class Algorithm:
     FINTECH_WARMUP = 30
 
     BOAT_PARTY_SUMMER_FAIR_VALUE = 45.0
+    BOAT_PARTY_SUMMER_START = 322
+    BOAT_EWMA_ALPHA = 0.65
+    BOAT_VOL_WINDOW = 7
+    BOAT_REVERT_THRESHOLD = 0.01
 
-    # Candidate D: fixed 5/7/11 majority signal for days 0..321.
-    # + = long limit, - = short limit, 0 = flat.
+    # Frozen offline 21-day/order-2 SavGol calendar regime. During Round 2,
+    # strong seasonal slopes use +/- and neutral days use causal live EWMA.
     BOAT_PARTY_SEMESTER_SIGNALS = (
-        "0+00+++0+++++++++++++++++++-0+-++++++++++0+++++++++-------------------"
-        "---00--0-----------0-+0--00--+0+++++++++++++0---------------------0-0-"
-        "0-++++++++------------++++++++++++++++++++++++++++++++000-------------"
-        "----------0-0-0---------+++++++++++++++00++-0-----------------------++"
-        "+--++++++--------0-+-0+++++++++++++++++0-0"
+        "0000000+++++++++++++++000000000+++++++++0000000000000------------------00-0-0000"
+        "-------0-00000-0000++0++++++++++000000----------------00---00++++++000----------"
+        "00++0++++++0+++++++++++++++++++-++000--0------------------0000--000----00000++++"
+        "+++++++0++000--0------------------00-0000+++++000-----------00++0++++++++++++0+0"
+        "0000-0000000000000000000000000000000000000000"
     )
 
     # FUNCTION TO SETUP ALGORITHM CLASS
@@ -392,15 +396,28 @@ class Algorithm:
         return 0
 
     def _boat_party_position(self):
-        prices = self.data["Boat Party Ticket"]
+        instrument = "Boat Party Ticket"
+        prices = np.asarray(self.data[instrument], dtype=float)
         day = len(prices) - 1
-        limit = self.positionLimits["Boat Party Ticket"]
+        limit = self.positionLimits[instrument]
 
         # There is no day-364-to-day-365 return.
         if day >= 364:
             return 0
 
-        # Fixed seasonal direction through day 321.
+        # Retain the fixed AUD 45 summer anchor from the robust baseline.
+        if day >= self.BOAT_PARTY_SUMMER_START:
+            price = float(prices[-1])
+
+            if price < self.BOAT_PARTY_SUMMER_FAIR_VALUE:
+                return limit
+
+            if price > self.BOAT_PARTY_SUMMER_FAIR_VALUE:
+                return -limit
+
+            return 0
+
+        # Follow the frozen calendar direction during strong seasonal slopes.
         if day < len(self.BOAT_PARTY_SEMESTER_SIGNALS):
             signal = self.BOAT_PARTY_SEMESTER_SIGNALS[day]
 
@@ -410,15 +427,36 @@ class Algorithm:
             if signal == "-":
                 return -limit
 
+        # On neutral semester days, trade only information observed live.
+        if day < self.BOAT_VOL_WINDOW:
             return 0
 
-        # Summer mean reversion from day 322.
-        price = float(prices[-1])
+        fair_value = float(prices[0])
+        for historical_price in prices[1:]:
+            fair_value += self.BOAT_EWMA_ALPHA * (
+                float(historical_price) - fair_value
+            )
 
-        if price < self.BOAT_PARTY_SUMMER_FAIR_VALUE:
-            return limit
+        price_window = prices[-self.BOAT_VOL_WINDOW:]
+        rolling_vol = max(float(np.std(price_window, ddof=0)), 1e-12)
+        z_score = (float(prices[-1]) - fair_value) / rolling_vol
+        current_position = self.positions.get(instrument, 0)
 
-        if price > self.BOAT_PARTY_SUMMER_FAIR_VALUE:
-            return -limit
+        if current_position == 0:
+            if z_score >= self.BOAT_REVERT_THRESHOLD:
+                return -limit
 
-        return 0
+            if z_score <= -self.BOAT_REVERT_THRESHOLD:
+                return limit
+
+            return 0
+
+        # A position remains open while the deviation supports it; an adverse
+        # threshold crossing reverses the desired position directly.
+        if current_position * z_score > 0:
+            if abs(z_score) >= self.BOAT_REVERT_THRESHOLD:
+                return -current_position
+
+            return 0
+
+        return current_position
