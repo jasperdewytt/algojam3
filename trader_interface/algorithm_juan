@@ -2,6 +2,18 @@ import numpy as np
 
 DAILY_BUDGET = 600_000
 
+BUDGET_TRIM_ORDER = (
+    "Bread",
+    "Sausage",
+    "Sausage Sizzle",
+    "MenuDash",
+    "UQ Dollar",
+    "Thrifted Jeans",
+    "Fintech Token",
+    "Boat Party Ticket",
+    "Liferaft Ticket",
+)
+
 UQ_FAIR_VALUE = 100.0
 
 FINTECH_WARMUP = 30
@@ -65,28 +77,53 @@ class Algorithm():
         self.day = 0     
         self.positions = positions 
 
-    def scale_portfolio(self, positions: dict[str, int]) -> dict[str, int]:
-        exposure = 0.0
+    def _apply_budget(self, desired_positions: dict[str, int]) -> dict[str, int]:
+        adjusted = desired_positions
 
-        for instrument, position in positions.items():
-            price = self.get_current_price(instrument)
-            exposure += abs(position) * price
+        prices = {
+            instrument: float(self.data[instrument][-1])
+            for instrument in adjusted
+        }
+        gross_value = sum(
+            abs(position * prices[instrument])
+            for instrument, position in adjusted.items()
+        )
 
-        if exposure <= DAILY_BUDGET:
-            return positions
+        if gross_value <= DAILY_BUDGET:
+            return adjusted
 
-        # if positions["Sausage"] != 0:
-        #     positions["Sausage"] = 0
+        trim_order = BUDGET_TRIM_ORDER + tuple(
+            instrument
+            for instrument in adjusted
+            if instrument not in BUDGET_TRIM_ORDER
+        )
 
-        #     return self.scale_portfolio(positions)
+        for instrument in trim_order:
+            if instrument not in adjusted:
+                continue
 
-        scale = DAILY_BUDGET / exposure
-        scaled = {}
+            position = adjusted[instrument]
+            unit_value = abs(prices[instrument])
 
-        for instrument, position in positions.items():
-            scaled[instrument] = int(position * scale)
+            if position == 0 or not np.isfinite(unit_value) or unit_value <= 0:
+                continue
 
-        return scaled
+            excess = gross_value - DAILY_BUDGET
+            if excess <= 0:
+                break
+
+            units_to_trim = min(
+                abs(position),
+                max(1, int(np.ceil(excess / unit_value))),
+            )
+
+            adjusted[instrument] = int(
+                position - np.sign(position) * units_to_trim
+            )
+
+            gross_value -= units_to_trim * unit_value
+
+        return adjusted
 
     def _thrifted_jeans_position(self) -> int:
         price = self.get_current_price("Thrifted Jeans")
@@ -557,4 +594,5 @@ class Algorithm():
         desired_positions["MenuDash"] = self._menudash_position()
         desired_positions["Boat Party Ticket"] = self._boat_party_position()
 
-        return self.scale_portfolio(desired_positions)
+        # return self._scale_portfolio(desired_positions)
+        return self._apply_budget(desired_positions)
