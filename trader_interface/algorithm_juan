@@ -45,15 +45,17 @@ SIZZLE_SEED = np.array([
 BOAT_VOL_WINDOW = 7
 BOAT_ALPHA = 0.65
 BOAT_REVERT_THRESHOLD = 0.1
+BOAT_SUMMER_FAIR_VALUE = 45.0
 
 BOAT_PARTY_SIGNALS = (
-    "0000000+++++++++++++++000000000+++++++++0000000000000------------------"
-    "000000000-------000000000000000++++++++++000000----------------0000000+"
-    "+++++000----------00000++++++++++++++++++++++++++++000000000-----------"
-    "-------000000000----00000+++++++++++000000000------------------"
-    "0000000+++++000-----------00000++++++++++++0000000000000000000000000000"
-    "000000000000000000"
+    "0000000+++++++++++++++000000000+++++++++0000000000000------------------0"
+    "00000000-------000000000000000++++++++++000000----------------0000000+++"
+    "+++000----------00000++++++++++++++++++++++++++++000000000--------------"
+    "----000000000----00000+++++++++++000000000------------------0000000+++++"
+    "000-----------00000++++++++++++"
 )
+
+print(len(BOAT_PARTY_SIGNALS))
 
 class Algorithm():
     def __init__(self, positions):
@@ -442,41 +444,26 @@ class Algorithm():
 
         return 0
 
-    # def _boat_party_position(self):
-    #     limit = self.positionLimits["Boat Party Ticket"]
-
-    #     if self.day < len(BOAT_PARTY_SIGNALS):
-    #         signal = BOAT_PARTY_SIGNALS[self.day]
-
-    #         if signal == "+":
-    #             return limit
-
-    #         if signal == "-":
-    #             return -limit
-
-    #         return 0
-
-    #     price = self.get_current_price("Boat Party Ticket")
-
-    #     if price < BOAT_PARTY_SUMMER_FAIR_VALUE:
-    #         return limit
-
-    #     if price > BOAT_PARTY_SUMMER_FAIR_VALUE:
-    #         return -limit
-
-    #     return 0
-
     def _boat_party_position(self) -> int:
         if self.day < BOAT_VOL_WINDOW:
             return 0
         
-        current_price = self.get_current_price("Boat Party Ticket")
+        price = self.get_current_price("Boat Party Ticket")
+        limit = self.positionLimits["Boat Party Ticket"]
 
         day_of_year = self.day % 365
+
+        if day_of_year > len(BOAT_PARTY_SIGNALS) - 1:
+            if price > BOAT_SUMMER_FAIR_VALUE:
+                return -limit
+    
+            if price < BOAT_SUMMER_FAIR_VALUE:
+                return limit
+    
+            return 0
+
         regime = BOAT_PARTY_SIGNALS[day_of_year]
 
-        limit = self.positionLimits["Boat Party Ticket"]
-        
         if regime == '+':
             return limit
         
@@ -492,7 +479,7 @@ class Algorithm():
         for price in prices[1:]:
             fair_value += BOAT_ALPHA * (price - fair_value)
 
-        z_score = (current_price - fair_value) / rolling_vol
+        z_score = (price - fair_value) / rolling_vol
         
         current_pos = self.positions["Boat Party Ticket"]
         
