@@ -1,401 +1,598 @@
-# Library Imports
-import os
-import pandas as pd
-from algorithm import Algorithm
 import numpy as np
-import matplotlib.pyplot as plt
-from decimal import Decimal, ROUND_HALF_UP
-from matplotlib.gridspec import GridSpec
-import math
 
-##############################
-# Define constants
-##############################
-# PRODUCTS AND THEIR INDIVIDUAL BUDGETS IN $AUD
-positionLimits = {
-    "Fintech Token": 100, 
-    "Thrifted Jeans": 800,  
-    "UQ Dollar": 650,
-    "Sausage Sizzle": 3000,  
-    "Bread": 500,    
-    "MenuDash": 75000,   
-    "Sausage": 5000,   
-    "Liferaft Ticket": 1, 
-    "Boat Party Ticket": 1000, 
-}
+DAILY_BUDGET = 600_000
 
-# TOTAL DAILY BUDGET IN $AUD
-totalDailyBudget = 600000
+BUDGET_TRIM_ORDER = (
+    "Bread",
+    "Sausage",
+    "Sausage Sizzle",
+    "MenuDash",
+    "UQ Dollar",
+    "Thrifted Jeans",
+    "Fintech Token",
+    "Boat Party Ticket",
+    "Liferaft Ticket",
+)
 
-NO_LOCAL_PNL_INSTRUMENTS = {"Liferaft Ticket"}
-##############################
+UQ_FAIR_VALUE = 100.0
 
-# Trading Engine Class, Controlling Trades Tracking
-class TradingEngine:
-    def __init__(self, dataFolder='data/'):
-        # Resolve the data folder relative to this script if a relative path is provided.
-        if not os.path.isabs(dataFolder):
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            dataFolder = os.path.normpath(os.path.join(base_dir, dataFolder))
+FINTECH_WARMUP = 30
+FINTECH_EWMA_CONFIGS = (
+    (0.85, 0.75),
+    (0.90, 0.80),
+    (0.75, 0.95),
+)
 
-        self.dataFolder = dataFolder
-        # Store active positions
-        self.positions = {}
-        # Position Limits
-        self.positionLimits = positionLimits
-        # Daily return history of each instrument
-        self.returnsHistory = {}
-        # Instrument cumulative returns history
-        self.cumulativeReturnsHistory = {}
-        # Store position as % of limit for graphing
-        self.pcPositionHistorys = {}
-        # Daily return history of combined instruments
-        self.totalReturnHistory = []
-        # Cumulative historical value of combined instruments
-        self.totalValueHistory = []
-        # Total days in simulation
-        self.totalDays = 0
-        # Track total PNL across all instruments
-        self.totalPNL = 0
-        # Track pc of total budget used daily
-        self.pcTotalBudget = []
-        # Setup functions
-        self.load_data()
-        self.initialize_positions()
-        
+JEANS_Q_LEVEL = 0.47
+JEANS_Q_SLOPE = 0.04
+JEANS_OBSERVATION_VARIANCE = 10.0
+JEANS_INITIAL_SLOPE_VARIANCE = 4.0
+JEANS_SHORT_CONFIDENCE = 0.9
+JEANS_ALPHA = 0.09
+JEANS_VOL_WINDOW = 14
+JEANS_TREND_THRESHOLD = 0.8
+JEANS_REVERT_THRESHOLD = 0.1
 
-    # For loading in relevant data from .CSV Files
-    def load_data(self):
+BREAD_Q_LEVEL = 0.66
+BREAD_Q_SLOPE = 0.04
+BREAD_OBSERVATION_VARIANCE = 8.0
+BREAD_INITIAL_SLOPE_VARIANCE = 4.0
+BREAD_SHORT_CONFIDENCE = 0.3
+BREAD_ALPHA = 0.03
+BREAD_VOL_WINDOW = 14
+BREAD_TREND_THRESHOLD = 0.1
+BREAD_REVERT_THRESHOLD = 0.1
+
+FOOD_EMA_ALPHAS = (0.10, 0.15, 0.20)
+
+MENUDASH_WARMUP = 55
+MENUDASH_MAPPING_WINDOWS = (20, 60, 120)
+
+SIZZLE_WINDOW = 15
+SIZZLE_SEED = np.array([
+    0.00530057,  # Intercept
+    0.07690641,  # Bread change
+    1.67799649,  # Sausage change
+])
+
+BOAT_VOL_WINDOW = 7
+BOAT_ALPHA = 0.65
+BOAT_REVERT_THRESHOLD = 0.05
+BOAT_SUMMER_FAIR_VALUE = 45.0
+
+BOAT_PARTY_SIGNALS = (
+    "0000000+++++++++++++++000000000+++++++++0000000000000------------------0"
+    "00000000-------000000000000000++++++++++000000----------------0000000+++"
+    "+++000----------00000++++++++++++++++++++++++++++000000000--------------"
+    "----000000000----00000+++++++++++000000000------------------0000000+++++"
+    "000-----------00000++++++++++++"
+)
+
+print(len(BOAT_PARTY_SIGNALS))
+
+class Algorithm():
+    def __init__(self, positions):
         self.data = {}
-        for file in os.listdir(self.dataFolder):
-            if file.endswith('_price_history.csv'):
-                instrumentName = file.split('_')[0]
-                if instrumentName in positionLimits.keys():
-                    filePath = os.path.join(self.dataFolder, file)
-                    self.data[instrumentName] = pd.read_csv(filePath)
-                else:
-                    print(f"No position limit set for {instrumentName}. This dataset will not be loaded.")
-        # Ensure that all data have same length of days
-        numDays = len(self.data[list(self.data.keys())[0]])
-        print(f"Expected number of days: {numDays}")
-        for instrument, data in self.data.items():
-            if len(data) != numDays:
-                print(f"Mismatch found for {instrument}: has {len(data)} days instead of {numDays}")
-        print("Continuing with dataset verification...")
-        for data in self.data.values():
-            # if a dataset has a different number of days, exit
-            if len(data) != numDays:
-                print("\nError, not all datasets are the same length.\bExiting...")
-                exit(1)
-        # Otherwise, all data should have the same number of days.
-        self.totalDays = numDays
-        print("Datasets loaded successfully.")
+        self.positionLimits = {}  
+        self.day = 0     
+        self.positions = positions 
 
-    # Set initial positions to 0 for each
-    def initialize_positions(self):
-        for instrument in positionLimits: 
-            self.positions[instrument] = 0
-            self.returnsHistory[instrument] = []
-            self.cumulativeReturnsHistory[instrument] = []
-            self.pcPositionHistorys[instrument] = []
+    def _apply_budget(self, desired_positions: dict[str, int]) -> dict[str, int]:
+        adjusted = desired_positions
 
-    # Helper function to check that a given order is within the daily budget.
-    # Also records the total utilisation of the daily budget.
-    def notWithinBudget(self, desiredPositions, priceHistory):
-        # calc total value of positions
-        totVal = 0
-        for instrument, history in priceHistory.items():
-            pos = desiredPositions[instrument]
-            price = history[-1]
-            value = abs(pos*price)
-            totVal += value
-        # if the budget is exceeded
-        if totVal > totalDailyBudget:
-            print("#########")
-            print(f"Over budget by ${totVal-totalDailyBudget}.")
-            # display values of each instrument position.
-            for instrument, prcHistory in priceHistory.items():
-                pos = desiredPositions[instrument]
-                price = prcHistory[-1]
-                value = abs(pos*price)
-                totVal += value
-                print(f"{instrument} position value: ${value}.")
-            print("#########")
-            # record zero as daily position used of budget, as position will be reset to zero
-            self.pcTotalBudget.append(0)
-            # return true, as desired position not within budget.
-            return True
-        # within daily budget, so record % usage
-        pcBudgetUsage = round(totVal*100/totalDailyBudget,2)
-        self.pcTotalBudget.append(pcBudgetUsage)
-        # return false, as within the daily budget
-        return False
-
-    # Process submitted algorithm
-    def run_algorithms(self, algorithmsInstance):
-        # Loop through every day of data. day-1 indexing inside the PnL block
-        # below is always guarded by `if day != 0`, so day can safely run
-        # through totalDays-1 (the final row) without any out-of-range access.
-        for day in range(self.totalDays):
-            # Get current data history at this point in time
-            historicalData = {}
-            for instrument, priceData in self.data.items():
-                # Fetch all relevant data
-                priceHistory = priceData['Price'][:day+1].tolist()
-                # Add them to the historicalData store
-                historicalData[instrument] = priceHistory     
-            # Update the algorithms instance with the new information
-            algorithmsInstance.day = day
-            algorithmsInstance.data = historicalData
-            algorithmsInstance.positions = self.positions
-            algorithmsInstance.positionLimits = self.positionLimits
-            # Now get the desired positions from the competitors algorithm
-            desiredPositions = algorithmsInstance.get_positions()
-            
-            # Check if the desired positions are within total budget
-            if self.notWithinBudget(desiredPositions, historicalData):
-                # Set all desired positions to zero
-                for instrument in desiredPositions.keys():
-                    desiredPositions[instrument] = 0
-                print(f"REQUESTED POSIITONS EXCEED DAILY BUDGET OF: ${totalDailyBudget}.")
-                print(f"SET ALL DESIRED POSITIONS FOR DAY {day} TO ZERO.")
-                
-            # Store total return for the day
-            dailyReturn = 0
-            # Process profit/loss for each instrument:
-            for instrument, priceData in self.data.items():
-                # Perform desired position quality checks (int and within limits)
-                if (type(desiredPositions[instrument]) != type(1) or # not an int
-                        abs(desiredPositions[instrument]) > self.positionLimits[instrument] # not within limits
-                        ):
-                    # Incorrect value provided. Skip
-                    print(f"Position given for {instrument} on day {day} invalid.")
-                    print(f"Position given was {desiredPositions[instrument]}.")
-                    print(f"The limit for this instrument today is: {self.positionLimits[instrument]}")
-                    print(f"Setting desired position to zero units.")
-                    # Set zero
-                    desiredPositions[instrument] = 0
-                # Calculate PNL if not day 0
-                if day != 0:
-                    if instrument in NO_LOCAL_PNL_INSTRUMENTS:
-                        instrumentPNL = 0
-                    else:
-                        existingPosition = self.positions[instrument]
-                        currPrice = priceData["Price"][day]
-                        lastPrice = priceData["Price"][day-1]
-                        instrumentPNL = existingPosition * (currPrice - lastPrice)
-                        instrumentPNL = quantize_decimal(instrumentPNL, 2)
-                    self.returnsHistory[instrument].append(instrumentPNL)
-                    self.cumulativeReturnsHistory[instrument].append(
-                        instrumentPNL + self.cumulativeReturnsHistory[instrument][-1]
-                    )
-                    # add it to the daily return
-                    dailyReturn += instrumentPNL
-                else:
-                    # No trades executed first day
-                    self.returnsHistory[instrument].append(0)
-                    self.cumulativeReturnsHistory[instrument].append(0)
-            # Store positions in historical tracker for graphing
-            for instrument, desiredPosition in desiredPositions.items():
-                self.pcPositionHistorys[instrument].append(round(desiredPosition*100/self.positionLimits[instrument]))
-            # Add the daily return to the tracker
-            self.totalReturnHistory.append(dailyReturn)
-            # Update total PNL
-            self.totalPNL += dailyReturn
-            # Display PNL
-            print(f"Total PNL @ Day {day}: {self.totalPNL}")
-            # Update total Value
-            self.totalValueHistory.append(self.totalPNL)
-            # Update simluator information
-            self.positions = desiredPositions
-            
-
-    def plot_returns(self):
-        # ── Palette ──────────────────────────────────────────────────────────
-        BG          = "#FFFFFF"
-        GRID_COLOR  = "#E0E0E0"
-        SPINE_COLOR = "#CCCCCC"
-        TEXT_COLOR  = "#1A1A2E"
-        ACCENT      = "#1565C0"   # total P&L line / budget fill
-        ZERO_COLOR  = "#9E9E9E"
-        INSTRUMENT_COLORS = [
-            "#E53935", "#43A047", "#1E88E5", "#FB8C00",
-            "#8E24AA", "#00ACC1", "#D81B60", "#6D4C41",
-            "#3949AB", "#00897B",
-        ]
-
-        # ── Global style ─────────────────────────────────────────────────────
-        plt.rcParams.update({
-            "font.family":        "DejaVu Sans",
-            "font.size":          9,
-            "axes.titlesize":     10,
-            "axes.titleweight":   "bold",
-            "axes.titlepad":      8,
-            "axes.labelsize":     8,
-            "axes.labelcolor":    TEXT_COLOR,
-            "xtick.labelsize":    8,
-            "ytick.labelsize":    8,
-            "xtick.color":        TEXT_COLOR,
-            "ytick.color":        TEXT_COLOR,
-            "legend.fontsize":    7,
-            "legend.framealpha":  0.9,
-            "legend.edgecolor":   SPINE_COLOR,
-        })
-
-        # ── Layout ───────────────────────────────────────────────────────────
-        fig = plt.figure(figsize=(18, 10), facecolor=BG)
-        gs  = GridSpec(2, 2, figure=fig,
-                       hspace=0.45, wspace=0.32,
-                       left=0.07, right=0.97, top=0.91, bottom=0.07)
-
-        ax_total  = fig.add_subplot(gs[0, 0])   # top-left:     total cumulative P&L
-        ax_indiv  = fig.add_subplot(gs[0, 1])   # top-right:    per-instrument cumulative P&L
-        ax_budget = fig.add_subplot(gs[1, 0])   # bottom-left:  budget utilisation
-        ax_bar    = fig.add_subplot(gs[1, 1])   # bottom-right: per-instrument P&L bar chart
-
-        # ── Shared axis styling ───────────────────────────────────────────────
-        def style_ax(ax):
-            ax.set_facecolor(BG)
-            ax.grid(True, color=GRID_COLOR, linewidth=0.8, linestyle="-", zorder=0)
-            ax.set_axisbelow(True)
-            for spine in ["top", "right"]:
-                ax.spines[spine].set_visible(False)
-            for spine in ["left", "bottom"]:
-                ax.spines[spine].set_color(SPINE_COLOR)
-            ax.tick_params(axis="both", color=SPINE_COLOR)
-            ax.margins(x=0)
-
-        for ax in [ax_total, ax_indiv, ax_budget, ax_bar]:
-            style_ax(ax)
-
-        # ── Print metrics ─────────────────────────────────────────────────────
-        print("#" * 50)
-        print(f"Total PNL ($): {self.totalPNL}")
-        print("#" * 50)
-        for instrument, returns in self.cumulativeReturnsHistory.items():
-            print(f"{instrument} Returns ($): {returns[-1]}")
-        print("#" * 50)
-
-        # ── ax_total — Cumulative P&L ─────────────────────────────────────────
-        tv   = [float(v) for v in self.totalValueHistory]
-        days = range(len(tv))
-        ax_total.plot(tv, color=ACCENT, linewidth=2, zorder=3)
-        ax_total.fill_between(days, tv, 0,
-                              where=[v >= 0 for v in tv],
-                              alpha=0.12, color=ACCENT, zorder=2)
-        ax_total.fill_between(days, tv, 0,
-                              where=[v < 0 for v in tv],
-                              alpha=0.12, color="#E53935", zorder=2)
-        ax_total.axhline(0, color=ZERO_COLOR, linewidth=0.9, linestyle="--", zorder=1)
-        ax_total.scatter(len(tv) - 1, tv[-1], color=ACCENT, zorder=5, s=55)
-        ax_total.annotate(
-            f"${tv[-1]:,.2f}",
-            xy=(len(tv) - 1, tv[-1]),
-            xytext=(-10, 10), textcoords="offset points",
-            fontsize=9, fontweight="bold", color=ACCENT, ha="center",
-        )
-        ax_total.set_title("Cumulative P&L")
-        ax_total.set_xlabel("Day")
-        ax_total.set_ylabel("$AUD")
-        ax_total.yaxis.set_major_formatter(
-            plt.FuncFormatter(lambda x, _: f"${x:,.0f}")
+        prices = {
+            instrument: float(self.data[instrument][-1])
+            for instrument in adjusted
+        }
+        gross_value = sum(
+            abs(position * prices[instrument])
+            for instrument, position in adjusted.items()
         )
 
-        # ── ax_indiv — Individual Cumulative P&L ──────────────────────────────
-        lines_indiv = []
-        for (instrument, returns), color in zip(
-                self.cumulativeReturnsHistory.items(), INSTRUMENT_COLORS):
-            returns = [float(v) for v in returns]
-            line, = ax_indiv.plot(returns, label=instrument, color=color,
-                                  linewidth=1.4, zorder=3)
-            lines_indiv.append(line)
-        ax_indiv.axhline(0, color=ZERO_COLOR, linewidth=0.9, linestyle="--", zorder=1)
-        legend_indiv = ax_indiv.legend(loc="upper left", ncol=2)
-        ax_indiv.set_title("Individual Cumulative P&L")
-        ax_indiv.set_xlabel("Day")
-        ax_indiv.set_ylabel("$AUD")
-        ax_indiv.yaxis.set_major_formatter(
-            plt.FuncFormatter(lambda x, _: f"${x:,.0f}")
+        if gross_value <= DAILY_BUDGET:
+            return adjusted
+
+        trim_order = BUDGET_TRIM_ORDER + tuple(
+            instrument
+            for instrument in adjusted
+            if instrument not in BUDGET_TRIM_ORDER
         )
 
-        # ── ax_budget — Budget Utilisation ───────────────────────────────────
-        budget = self.pcTotalBudget
-        ax_budget.plot(budget, color=ACCENT, linewidth=1.5, zorder=3)
-        ax_budget.fill_between(range(len(budget)), budget,
-                               alpha=0.15, color=ACCENT, zorder=2)
-        ax_budget.margins(y=0)
-        ax_budget.axhline(100, color="#E53935", linewidth=0.8,
-                          linestyle="--", zorder=1, alpha=0.6)
-        ax_budget.set_title("Daily Budget Utilisation")
-        ax_budget.set_xlabel("Day")
-        ax_budget.set_ylabel("% of $600K limit")
+        for instrument in trim_order:
+            if instrument not in adjusted:
+                continue
 
-        # ── ax_bar — Per-instrument P&L bar chart ────────────────────────────
-        bar_data = sorted(
-            [(inst, float(returns[-1])) for inst, returns in self.cumulativeReturnsHistory.items()],
-            key=lambda x: x[1],
-        )
-        instruments, finals = zip(*bar_data)
-        bar_colors = ["#E53935" if v < 0 else "#43A047" for v in finals]
-        bars = ax_bar.barh(instruments, finals, color=bar_colors, zorder=3, height=0.6)
-        ax_bar.axvline(0, color=ZERO_COLOR, linewidth=0.9, linestyle="--", zorder=1)
-        for bar, val in zip(bars, finals):
-            x = bar.get_width()
-            ax_bar.text(
-                x + (max(finals) - min(finals)) * 0.01, bar.get_y() + bar.get_height() / 2,
-                f"${val:,.0f}", va="center", ha="left", fontsize=7.5, color=TEXT_COLOR,
+            position = adjusted[instrument]
+            unit_value = abs(prices[instrument])
+
+            if position == 0 or not np.isfinite(unit_value) or unit_value <= 0:
+                continue
+
+            excess = gross_value - DAILY_BUDGET
+            if excess <= 0:
+                break
+
+            units_to_trim = min(
+                abs(position),
+                max(1, int(np.ceil(excess / unit_value))),
             )
-        ax_bar.margins(x=0.02, y=0.04)
-        ax_bar.set_title("P&L by Instrument")
-        ax_bar.set_xlabel("$AUD")
-        ax_bar.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"${x:,.0f}"))
 
-        # ── Figure title ──────────────────────────────────────────────────────
-        fig.suptitle(
-            f"Simulation Results    |    Total P&L: ${float(self.totalPNL):,.2f}",
-            fontsize=13, fontweight="bold", color=TEXT_COLOR, y=0.97,
+            adjusted[instrument] = int(
+                position - np.sign(position) * units_to_trim
+            )
+
+            gross_value -= units_to_trim * unit_value
+
+        return adjusted
+
+    def _thrifted_jeans_position(self) -> int:
+        price = self.get_current_price("Thrifted Jeans")
+
+        if not hasattr(self, "_jeans_ewma") or self.day == 0:
+            self._jeans_ewma = self._jeans_prev_ewma = price
+        else:
+            self._jeans_prev_ewma = self._jeans_ewma
+            self._jeans_ewma += JEANS_ALPHA * (price - self._jeans_ewma)
+            
+        if self.day == 0:
+            return 0
+        
+        prices = self.get_seen_prices("Thrifted Jeans")
+
+        transition = np.array([[1.0, 1.0], [0.0, 1.0]])
+        process_covariance = np.diag([JEANS_Q_LEVEL, JEANS_Q_SLOPE])
+        observation_vector = np.array([1.0, 0.0])
+
+        state = np.array([prices[0], 0.0])
+
+        covariance = np.diag([
+            JEANS_OBSERVATION_VARIANCE,
+            JEANS_INITIAL_SLOPE_VARIANCE,
+        ])
+
+        for day, price in enumerate(prices):
+            if day > 0:
+                state = transition @ state
+                covariance = (
+                    transition @ covariance @ transition.T + process_covariance
+                )
+
+            innovation = price - float(observation_vector @ state)
+
+            innovation_variance = (
+                float(observation_vector @ covariance @ observation_vector)
+                + JEANS_OBSERVATION_VARIANCE
+            )
+
+            gain = (
+                covariance @ observation_vector
+                / max(innovation_variance, 1e-12)
+            )
+
+            state += gain * innovation
+            covariance = covariance - np.outer(
+                gain, observation_vector @ covariance
+            )
+
+            covariance = (covariance + covariance.T) / 2.0
+
+        estimated_slope = float(state[1])
+        slope_uncertainty = np.sqrt(max(float(covariance[1, 1]), 0.0))
+        trend_strength = abs(estimated_slope) / max(slope_uncertainty, 1e-12)
+
+        limit = self.positionLimits["Thrifted Jeans"]
+
+        if trend_strength >= JEANS_TREND_THRESHOLD:
+            if estimated_slope < -JEANS_SHORT_CONFIDENCE * slope_uncertainty:
+                return -limit
+
+            return limit
+
+        if self.day < JEANS_VOL_WINDOW:
+            return limit
+
+        price_window = prices[-JEANS_VOL_WINDOW:]
+        rolling_std = max(float(np.std(price_window)), 1e-12)
+
+        z_score = (price - self._jeans_ewma) / rolling_std
+        ewma_slope = self._jeans_ewma - self._jeans_prev_ewma
+        print(ewma_slope)
+
+        current_pos = self.positions["Thrifted Jeans"]
+
+        if current_pos == 0:
+            if z_score <= -JEANS_REVERT_THRESHOLD or ewma_slope > 0:
+                return limit
+
+            elif z_score >= JEANS_REVERT_THRESHOLD:
+                return -limit
+            
+            return 0
+        
+        elif current_pos * z_score > 0:
+            if abs(z_score) >= JEANS_REVERT_THRESHOLD:
+                return -current_pos
+            
+            return 0
+        
+        return current_pos
+
+    def _uq_dollar_position(self) -> int:
+        price = self.get_current_price("UQ Dollar")
+        limit = self.positionLimits["UQ Dollar"]
+
+        if price > UQ_FAIR_VALUE:
+            return -limit
+
+        if price < UQ_FAIR_VALUE:
+            return limit
+
+        return 0
+
+    def _sausage_sizzle_position(self) -> int:        
+        if self.day == 0:
+            return 0
+        
+        bread = self.get_seen_prices("Bread")
+        sausage = self.get_seen_prices("Sausage")
+        sizzle = self.get_seen_prices("Sausage Sizzle")
+
+        current_features = np.array([
+            1.0,
+            bread[self.day] - bread[self.day - 1],
+            sausage[self.day] - sausage[self.day - 1]
+        ])
+
+        if self.day <= SIZZLE_WINDOW:
+            coefficients = SIZZLE_SEED
+
+        else:
+            start = self.day - SIZZLE_WINDOW
+            feature_rows = []
+            targets = []
+
+            for observation_day in range(start, self.day):
+                feature_rows.append([
+                    1.0,
+                    bread[observation_day] - bread[observation_day - 1],
+                    sausage[observation_day] - sausage[observation_day - 1]
+                ])
+
+                targets.append(
+                    sizzle[observation_day + 1] - sizzle[observation_day]
+                )
+
+            design = np.asarray(feature_rows, dtype=float)
+            targets = np.asarray(targets, dtype=float)
+
+            coefficients, *_ = np.linalg.lstsq(design, targets, rcond=None)
+
+        predicted_change = float(current_features @ coefficients)
+        limit = self.positionLimits["Sausage Sizzle"]
+
+        if predicted_change > 0:
+            return limit
+
+        if predicted_change < 0:
+            return -limit
+
+        return 0
+
+    def _menudash_position(self) -> int:
+        if self.day < MENUDASH_WARMUP:
+            return 0
+        
+        menu = self.get_seen_prices("MenuDash")
+        sizzle = self.get_seen_prices("Sausage Sizzle")
+        bread = self.get_seen_prices("Bread")
+        sausage = self.get_seen_prices("Sausage")
+
+        observation_days = np.arange(1, self.day)
+
+        change_design = np.column_stack([
+            np.ones(len(observation_days)),
+            bread[observation_days] - bread[observation_days - 1],
+            sausage[observation_days] - sausage[observation_days - 1],
+        ])
+
+        change_targets = (
+            sizzle[observation_days + 1] - sizzle[observation_days]
         )
 
-        # ── Legend picking (toggle visibility) ───────────────────────────────
-        all_instrument_lines = lines_indiv
-        def on_pick(event):
-            artist = event.artist
-            visible = not artist.get_visible()
-            artist.set_visible(visible)
-            for line in all_instrument_lines:
-                if line.get_label() == artist.get_label():
-                    line.set_visible(visible)
-            fig.canvas.draw()
+        ingredient_coefficients, *_ = np.linalg.lstsq(
+            change_design, change_targets, rcond=None,
+        )
 
-        for item in legend_indiv.get_lines():
-            item.set_picker(True)
-        fig.canvas.mpl_connect("pick_event", on_pick)
+        bread_loading = ingredient_coefficients[1]
+        sausage_loading = ingredient_coefficients[2]
 
-        # ── Save & show ───────────────────────────────────────────────────────
-        output_dir = "./simulation_results"
-        os.makedirs(output_dir, exist_ok=True)
-        fig.savefig(os.path.join(output_dir, "returns_plot.png"),
-                    dpi=300, facecolor=BG, bbox_inches="tight")
-        plt.show()
-        plt.close(fig)
+        labour_sensor = (
+            sizzle[1:self.day+1]
+            - bread_loading * bread[:self.day]
+            - sausage_loading * sausage[:self.day]
+        )
 
+        menu_targets = menu[:self.day]
+        latest_sensor = labour_sensor[-1]
+
+        votes = 0
+
+        for mapping_window in MENUDASH_MAPPING_WINDOWS:
+            sensor_history = labour_sensor
+            target_history = menu_targets
+
+            if mapping_window is not None:
+                sensor_history = sensor_history[-mapping_window:]
+                target_history = target_history[-mapping_window:]
+
+            mapping_design = np.column_stack([
+                np.ones(len(sensor_history)),
+                sensor_history,
+            ])
+
+            mapping_coefficients, *_ = np.linalg.lstsq(
+                mapping_design, target_history, rcond=None,
+            )
+
+            fair_value = float(
+                mapping_coefficients @ np.array([1.0, latest_sensor])
+            )
+
+            votes += int(np.sign(fair_value - menu[self.day]))
+
+        limit = self.positionLimits["MenuDash"]
+
+        if votes > 0:
+            return limit
+
+        if votes < 0:
+            return -limit
+
+        return 0
+
+    def _bread_position(self) -> int:
+        price = self.get_current_price("Bread")
+
+        if not hasattr(self, "_bread_ewma") or self.day == 0:
+            self._bread_ewma = price
+        else:
+            self._bread_ewma += BREAD_ALPHA * (price - self._bread_ewma)
+
+        if self.day == 0:
+            return 0
+
+        prices = self.get_seen_prices("Bread")
+
+        transition = np.array([[1.0, 1.0], [0.0, 1.0]])
+        process_covariance = np.diag([BREAD_Q_LEVEL, BREAD_Q_SLOPE])
+        observation_vector = np.array([1.0, 0.0])
+
+        state = np.array([prices[0], 0.0])
+        covariance = np.diag(
+            [BREAD_OBSERVATION_VARIANCE, BREAD_INITIAL_SLOPE_VARIANCE]
+        )
+
+        for day, price in enumerate(prices):
+            if day > 0:
+                state = transition @ state
+                covariance = (
+                    transition @ covariance @ transition.T 
+                    + process_covariance
+                )
+
+            innovation = price - float(observation_vector @ state)
+
+            innovation_variance = (
+                float(observation_vector @ covariance @ observation_vector) 
+                + BREAD_OBSERVATION_VARIANCE
+            )
+
+            gain = (
+                covariance @ observation_vector 
+                / max(innovation_variance, 1e-12)
+            )
+
+            state += gain * innovation
+
+            covariance = (
+                covariance - np.outer(gain, observation_vector @ covariance)
+            )
+
+            covariance = (covariance + covariance.T) / 2.0
+
+        estimated_slope = float(state[1])
+        slope_uncertainty = np.sqrt(max(float(covariance[1, 1]), 0.0))
+        trend_strength = abs(estimated_slope) / max(slope_uncertainty, 1e-12)
+
+        limit = self.positionLimits["Bread"]
+
+        if trend_strength >= BREAD_TREND_THRESHOLD:
+            short = estimated_slope < -BREAD_SHORT_CONFIDENCE * slope_uncertainty
+            return -limit if short else limit
+
+        if self.day < BREAD_VOL_WINDOW:
+            return limit
+
+        price_window = prices[-BREAD_VOL_WINDOW:]
+        rolling_std = max(float(np.std(price_window)), 1e-12)
+        z_score = (prices[-1] - self._bread_ewma) / rolling_std
+
+        current_pos = self.positions["Bread"]
         
+        if current_pos == 0 and abs(z_score) >= BREAD_REVERT_THRESHOLD:
+            return -limit if z_score > 0 else limit
+            
+        elif current_pos * z_score > 0:
+            if abs(z_score) >= BREAD_REVERT_THRESHOLD:
+                return -current_pos
+            
+            return 0
 
-# Function to round a float
-def quantize_decimal(value, decimal_places=2):
-    # str() first: Decimal() rejects numpy scalar types (e.g. np.int64, which
-    # pandas produces for an all-integer price column) even though they
-    # behave like plain int/float everywhere else.
-    decimal_value = Decimal(str(value))
-    if decimal_value % 1 == 0:  # Check if the number is an integer
-        return decimal_value.quantize(Decimal('1'), rounding=ROUND_HALF_UP)
-    else:  # For non-integers, round to the specified decimal places
-        rounding_format = '1.' + '0' * decimal_places
-        return decimal_value.quantize(Decimal(rounding_format), rounding=ROUND_HALF_UP)
+        return current_pos
 
+    def _fintech_token_position(self) -> int:
+        if self.day == 0:
+            return 0
+        
+        prices = self.get_seen_prices("Fintech Token")
 
-if __name__ == "__main__":
-    engine = TradingEngine()
-    algorithmInstance = Algorithm(engine.positions)
-    engine.run_algorithms(algorithmInstance)
-    engine.plot_returns()
+        changes = np.diff(prices)
+        latest_change = float(changes[-1])
+
+        if not np.isfinite(latest_change) or latest_change == 0:
+            return 0
+
+        latest_direction = int(np.sign(latest_change))
+        limit = self.positionLimits["Fintech Token"]
+
+        if len(changes) <= FINTECH_WARMUP:
+            return -limit * latest_direction
+
+        votes = 0
+
+        for decay, percentile in FINTECH_EWMA_CONFIGS:
+            variance = float(changes[0] ** 2)
+            volatility_history = [np.sqrt(variance)]
+
+            for change in changes[1:]:
+                variance = decay * variance + (1.0 - decay) * float(change**2)
+                volatility_history.append(np.sqrt(max(variance, 0.0)))
+
+            current_volatility = volatility_history[-1]
+
+            threshold = float(np.quantile(
+                volatility_history[:-1],
+                percentile,
+            ))
+
+            regime_direction = 1 if current_volatility >= threshold else -1
+            votes += regime_direction * latest_direction
+
+        if votes > 0:
+            return limit
+
+        if votes < 0:
+            return -limit
+
+        return 0
+
+    def _boat_party_position(self) -> int:
+        price = self.get_current_price("Boat Party Ticket")
+
+        if not hasattr(self, "_boat_ewma"):
+            self._boat_ewma = price
+        else:
+            self._boat_ewma += BOAT_ALPHA * (price - self._boat_ewma)
+
+        limit = self.positionLimits["Boat Party Ticket"]
+        day_of_year = self.day % 365
+
+        if day_of_year > len(BOAT_PARTY_SIGNALS) - 1:
+            if price > BOAT_SUMMER_FAIR_VALUE:
+                return -limit
+    
+            if price < BOAT_SUMMER_FAIR_VALUE:
+                return limit
+    
+            return 0
+
+        regime = BOAT_PARTY_SIGNALS[day_of_year]
+
+        if regime == '+':
+            return limit
+        
+        elif regime == '-':
+            return -limit
+
+        if self.day < BOAT_VOL_WINDOW:
+            return 0
+
+        prices = self.get_seen_prices("Boat Party Ticket")
+
+        price_window = prices[-BOAT_VOL_WINDOW:]
+        rolling_std = max(float(np.std(price_window)), 1e-12)
+        z_score = (price - self._boat_ewma) / rolling_std
+        
+        current_pos = self.positions["Boat Party Ticket"]
+        
+        if current_pos == 0:
+            if z_score >= BOAT_REVERT_THRESHOLD:
+                return -limit
+            
+            elif z_score <= -BOAT_REVERT_THRESHOLD:
+                return limit
+            
+            return 0
+            
+        elif current_pos * z_score > 0:
+            if abs(z_score) >= BOAT_REVERT_THRESHOLD:
+                return -current_pos
+            
+            return 0
+            
+        return current_pos
+
+    def _sausage_position(self, instrument = "Sausage"):
+        price = self.get_current_price(instrument)
+
+        if not hasattr(self, "_food_emas"):
+            self._food_emas = {}
+
+        if instrument not in self._food_emas or self.day == 0:
+            self._food_emas[instrument] = {alpha: price for alpha in FOOD_EMA_ALPHAS}
+
+        if self.day == 0:
+            return 0
+
+        votes = 0
+
+        for alpha in FOOD_EMA_ALPHAS:
+            ema = self._food_emas[instrument][alpha]
+            ema += alpha * (price - ema)
+
+            self._food_emas[instrument][alpha] = ema
+            votes += int(np.sign(price - ema))
+
+        limit = self.positionLimits[instrument]
+
+        if votes > 0:
+            return limit
+
+        if votes < 0:
+            return -limit
+
+        return 0
+
+    def get_seen_prices(self, instrument: str, window: int = 0) -> np.ndarray:
+        if window < 0:
+            raise ValueError("Window must be non-negative.")
+
+        prices = np.asarray(self.data[instrument], dtype=float)
+
+        if window == 0:
+            return prices
+
+        return prices[-window:]
+
+    def get_current_price(self, instrument: str) -> float:
+        return self.data[instrument][-1]
+    
+    def get_positions(self) -> dict[str, int]:
+        position_limits = self.positionLimits
+
+        desired_positions = {}
+
+        for instrument, _ in position_limits.items():
+            desired_positions[instrument] = 0
+
+        desired_positions["UQ Dollar"] = self._uq_dollar_position()
+        desired_positions["Fintech Token"] = self._fintech_token_position()
+        desired_positions["Thrifted Jeans"] = self._thrifted_jeans_position()
+        desired_positions["Bread"] = self._bread_position()
+        desired_positions["Sausage"] = self._sausage_position()
+        desired_positions["Sausage Sizzle"] = self._sausage_sizzle_position()
+        desired_positions["MenuDash"] = self._menudash_position()
+        desired_positions["Boat Party Ticket"] = self._boat_party_position()
+
+        # return self._scale_portfolio(desired_positions)
+        return self._apply_budget(desired_positions)
