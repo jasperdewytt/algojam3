@@ -3,37 +3,38 @@ import numpy as np
 DAILY_BUDGET = 600_000
 
 UQ_FAIR_VALUE = 100.0
-UQ_VOL_WINDOW = 20
 
 FINTECH_WARMUP = 30
 FINTECH_EWMA_CONFIGS = (
     (0.85, 0.75),
     (0.90, 0.80),
-    (0.95, 0.85),
+    (0.75, 0.95),
 )
 
-JEANS_Q_LEVEL = 0.5
-JEANS_Q_SLOPE = 0.05
-JEANS_OBSERVATION_VARIANCE = 5.0
-JEANS_INITIAL_SLOPE_VARIANCE = 1.0
-JEANS_SHORT_CONFIDENCE = 0.5
-JEANS_ALPHA = 0.06
-JEANS_TREND_THRESHOLD = 0.6
+JEANS_Q_LEVEL = 0.47
+JEANS_Q_SLOPE = 0.04
+JEANS_OBSERVATION_VARIANCE = 10.0
+JEANS_INITIAL_SLOPE_VARIANCE = 4.0
+JEANS_SHORT_CONFIDENCE = 0.4
+JEANS_ALPHA = 0.09
+JEANS_VOL_WINDOW = 14
+JEANS_TREND_THRESHOLD = 0.9
 JEANS_REVERT_THRESHOLD = 0.2
 
-BREAD_Q_LEVEL = 0.7
-BREAD_Q_SLOPE = 0.05
-BREAD_OBSERVATION_VARIANCE = 2.0
-BREAD_INITIAL_SLOPE_VARIANCE = 3.0
-BREAD_SHORT_CONFIDENCE = 0.7
-BREAD_ALPHA = 0.025
-BREAD_TREND_THRESHOLD = 0.4
-BREAD_REVERT_THRESHOLD = 0.2
+BREAD_Q_LEVEL = 0.66
+BREAD_Q_SLOPE = 0.04
+BREAD_OBSERVATION_VARIANCE = 8.0
+BREAD_INITIAL_SLOPE_VARIANCE = 4.0
+BREAD_SHORT_CONFIDENCE = 0.3
+BREAD_ALPHA = 0.03
+BREAD_VOL_WINDOW = 14
+BREAD_TREND_THRESHOLD = 0.1
+BREAD_REVERT_THRESHOLD = 0.1
 
-MENUDASH_WARMUP = 45
+FOOD_EMA_ALPHAS = (0.10, 0.15, 0.20)
+
+MENUDASH_WARMUP = 55
 MENUDASH_MAPPING_WINDOWS = (20, 60, 120)
-
-FOOD_EMA_ALPHAS = (0.118, 0.157, 0.169, 0.197, 0.366)
 
 SIZZLE_WINDOW = 15
 SIZZLE_SEED = np.array([
@@ -74,6 +75,11 @@ class Algorithm():
         if exposure <= DAILY_BUDGET:
             return positions
 
+        # if positions["Sausage"] != 0:
+        #     positions["Sausage"] = 0
+
+        #     return self.scale_portfolio(positions)
+
         scale = DAILY_BUDGET / exposure
         scaled = {}
 
@@ -83,6 +89,13 @@ class Algorithm():
         return scaled
 
     def _thrifted_jeans_position(self) -> int:
+        price = self.get_current_price("Thrifted Jeans")
+
+        if not hasattr(self, "_jeans_ewma") or self.day == 0:
+            self._jeans_ewma = price
+        else:
+            self._jeans_ewma += JEANS_ALPHA * (price - self._jeans_ewma)
+            
         if self.day == 0:
             return 0
         
@@ -137,22 +150,20 @@ class Algorithm():
 
             return limit
 
-        fair_value = prices[0]
+        if self.day < JEANS_VOL_WINDOW:
+            return limit
 
-        for p in prices[1:]:
-            fair_value += JEANS_ALPHA * (p - fair_value)
+        price_window = prices[-JEANS_VOL_WINDOW:]
+        rolling_std = max(float(np.std(price_window)), 1e-12)
+        z_score = (price - self._jeans_ewma) / rolling_std
 
-        residuals = prices - fair_value
-        res_std = max(float(np.std(residuals)), 1e-12)
-
-        z_score = (prices[-1] - fair_value) / res_std
         current_pos = self.positions["Thrifted Jeans"]
 
         if current_pos == 0:
             if z_score >= JEANS_REVERT_THRESHOLD:
                 return -limit
             
-            elif z_score <= -JEANS_REVERT_THRESHOLD:
+            if z_score <= -JEANS_REVERT_THRESHOLD:
                 return limit
             
             return 0
@@ -299,6 +310,13 @@ class Algorithm():
         return 0
 
     def _bread_position(self) -> int:
+        price = self.get_current_price("Bread")
+
+        if not hasattr(self, "_bread_ewma") or self.day == 0:
+            self._bread_ewma = price
+        else:
+            self._bread_ewma += BREAD_ALPHA * (price - self._bread_ewma)
+
         if self.day == 0:
             return 0
 
@@ -351,51 +369,25 @@ class Algorithm():
             short = estimated_slope < -BREAD_SHORT_CONFIDENCE * slope_uncertainty
             return -limit if short else limit
 
-        fair_value = prices[0]
-        for price in prices[1:]:
-            fair_value += BREAD_ALPHA * (price - fair_value)
+        if self.day < BREAD_VOL_WINDOW:
+            return limit
 
-        residuals = prices - fair_value
-        res_std = max(float(np.std(residuals)), 1e-12)
-        z_score = (prices[-1] - fair_value) / res_std
+        price_window = prices[-BREAD_VOL_WINDOW:]
+        rolling_std = max(float(np.std(price_window)), 1e-12)
+        z_score = (prices[-1] - self._bread_ewma) / rolling_std
 
         current_pos = self.positions["Bread"]
         
-        if current_pos == 0 and abs(z_score) >= BOAT_REVERT_THRESHOLD:
+        if current_pos == 0 and abs(z_score) >= BREAD_REVERT_THRESHOLD:
             return -limit if z_score > 0 else limit
             
         elif current_pos * z_score > 0:
-            if abs(z_score) >= BOAT_REVERT_THRESHOLD:
+            if abs(z_score) >= BREAD_REVERT_THRESHOLD:
                 return -current_pos
             
             return 0
 
         return current_pos
-
-    def _food_ema_position(self, instrument: str) -> int:
-        if self.day == 0:
-            return 0
-        
-        prices = self.get_seen_prices(instrument)
-        votes = 0
-
-        for alpha in FOOD_EMA_ALPHAS:
-            level = prices[0]
-
-            for historical_price in prices[1:-1]:
-                level += alpha * (historical_price - level)
-
-            votes += int(np.sign(prices[-1] - level))
-
-        limit = self.positionLimits[instrument]
-
-        if votes > 0:
-            return limit
-
-        if votes < 0:
-            return -limit
-
-        return 0
 
     def _fintech_token_position(self) -> int:
         if self.day == 0:
@@ -410,7 +402,6 @@ class Algorithm():
             return 0
 
         latest_direction = int(np.sign(latest_change))
-
         limit = self.positionLimits["Fintech Token"]
 
         if len(changes) <= FINTECH_WARMUP:
@@ -445,12 +436,14 @@ class Algorithm():
         return 0
 
     def _boat_party_position(self) -> int:
-        if self.day < BOAT_VOL_WINDOW:
-            return 0
-        
         price = self.get_current_price("Boat Party Ticket")
-        limit = self.positionLimits["Boat Party Ticket"]
 
+        if not hasattr(self, "_boat_ewma"):
+            self._boat_ewma = price
+        else:
+            self._boat_ewma += BOAT_ALPHA * (price - self._boat_ewma)
+
+        limit = self.positionLimits["Boat Party Ticket"]
         day_of_year = self.day % 365
 
         if day_of_year > len(BOAT_PARTY_SIGNALS) - 1:
@@ -470,16 +463,14 @@ class Algorithm():
         elif regime == '-':
             return -limit
 
+        if self.day < BOAT_VOL_WINDOW:
+            return 0
+
         prices = self.get_seen_prices("Boat Party Ticket")
 
         price_window = prices[-BOAT_VOL_WINDOW:]
-        rolling_vol = max(float(np.std(price_window)), 1e-12)
-
-        fair_value = prices[0]
-        for price in prices[1:]:
-            fair_value += BOAT_ALPHA * (price - fair_value)
-
-        z_score = (price - fair_value) / rolling_vol
+        rolling_std = max(float(np.std(price_window)), 1e-12)
+        z_score = (price - self._boat_ewma) / rolling_std
         
         current_pos = self.positions["Boat Party Ticket"]
         
@@ -499,6 +490,37 @@ class Algorithm():
             return 0
             
         return current_pos
+
+    def _sausage_position(self, instrument = "Sausage"):
+        price = self.get_current_price(instrument)
+
+        if not hasattr(self, "_food_emas"):
+            self._food_emas = {}
+
+        if instrument not in self._food_emas or self.day == 0:
+            self._food_emas[instrument] = {alpha: price for alpha in FOOD_EMA_ALPHAS}
+
+        if self.day == 0:
+            return 0
+
+        votes = 0
+
+        for alpha in FOOD_EMA_ALPHAS:
+            ema = self._food_emas[instrument][alpha]
+            ema += alpha * (price - ema)
+
+            self._food_emas[instrument][alpha] = ema
+            votes += int(np.sign(price - ema))
+
+        limit = self.positionLimits[instrument]
+
+        if votes > 0:
+            return limit
+
+        if votes < 0:
+            return -limit
+
+        return 0
 
     def get_seen_prices(self, instrument: str, window: int = 0) -> np.ndarray:
         if window < 0:
@@ -526,7 +548,7 @@ class Algorithm():
         desired_positions["Fintech Token"] = self._fintech_token_position()
         desired_positions["Thrifted Jeans"] = self._thrifted_jeans_position()
         desired_positions["Bread"] = self._bread_position()
-        # desired_positions["Sausage"] = self._food_ema_position("Sausage")
+        desired_positions["Sausage"] = self._sausage_position()
         desired_positions["Sausage Sizzle"] = self._sausage_sizzle_position()
         desired_positions["MenuDash"] = self._menudash_position()
         desired_positions["Boat Party Ticket"] = self._boat_party_position()
