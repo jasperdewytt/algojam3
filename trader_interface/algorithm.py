@@ -54,6 +54,8 @@ class Algorithm:
     BOAT_EWMA_ALPHA = 0.65
     BOAT_VOL_WINDOW = 7
     BOAT_REVERT_THRESHOLD = 0.01
+    ROUND_DAYS = 365
+    COMPETITION_FINAL_DAY = 730
 
     # Frozen offline 21-day/order-2 SavGol calendar regime. During Round 2,
     # strong seasonal slopes use +/- and neutral days use causal live EWMA.
@@ -461,15 +463,18 @@ class Algorithm:
     def _boat_party_position(self):
         instrument = "Boat Party Ticket"
         prices = np.asarray(self.data[instrument], dtype=float)
-        day = len(prices) - 1
+        history_day = len(prices) - 1
+        calendar_day = history_day % self.ROUND_DAYS
         limit = self.positionLimits[instrument]
 
-        # There is no day-364-to-day-365 return.
-        if day >= 364:
+        # Day 730 is the true terminal observation, with no following return
+        # to position for. The day-364 boundary may trade normally; whether
+        # its return is discarded by the P&L reset does not affect the signal.
+        if history_day >= self.COMPETITION_FINAL_DAY:
             return 0
 
         # Retain the fixed AUD 45 summer anchor from the robust baseline.
-        if day >= self.BOAT_PARTY_SUMMER_START:
+        if calendar_day >= self.BOAT_PARTY_SUMMER_START:
             price = float(prices[-1])
 
             if price < self.BOAT_PARTY_SUMMER_FAIR_VALUE:
@@ -481,8 +486,8 @@ class Algorithm:
             return 0
 
         # Follow the frozen calendar direction during strong seasonal slopes.
-        if day < len(self.BOAT_PARTY_SEMESTER_SIGNALS):
-            signal = self.BOAT_PARTY_SEMESTER_SIGNALS[day]
+        if calendar_day < len(self.BOAT_PARTY_SEMESTER_SIGNALS):
+            signal = self.BOAT_PARTY_SEMESTER_SIGNALS[calendar_day]
 
             if signal == "+":
                 return limit
@@ -491,7 +496,7 @@ class Algorithm:
                 return -limit
 
         # On neutral semester days, trade only information observed live.
-        if day < self.BOAT_VOL_WINDOW:
+        if history_day < self.BOAT_VOL_WINDOW:
             return 0
 
         fair_value = float(prices[0])
