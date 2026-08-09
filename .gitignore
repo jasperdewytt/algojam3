@@ -38,6 +38,7 @@ research/**/*_smoke_outputs/
 research/**/*_smoke_figures/
 research/**/papers/
 research/liferaft/*_RESULTS.json
+research/liferaft/*_EXECUTION_RECEIPT.json
 trader_interface/2024_data_DONOTUSENORMALLY/
 trader_interface/algorithm.zip
 assets/
