@@ -21,8 +21,24 @@ htmlcov/
 
 # Generated research and simulation artifacts
 tmp/
+output/
 trader_interface/simulation_results/
 *.log
+
+# Oversized raw research dumps (GitHub rejects files over 100 MB)
+research/liferaft/PASS5A_RESULTS.json
+research/liferaft/PASS6A_RESULTS.json
+research/liferaft/PASS6A_SENSITIVITY.json
+
+# Keep the repository focused on reproducible research source and reports
+research/**/results/
+research/**/*_outputs/
+research/**/*_smoke_outputs/
+research/**/*_smoke_figures/
+research/**/papers/
+trader_interface/2024_data_DONOTUSENORMALLY/
+trader_interface/algorithm.zip
+assets/
 
 # Jupyter temporary files
 .ipynb_checkpoints/
@@ -32,4 +48,3 @@ trader_interface/simulation_results/
 .idea/
 .DS_Store
 Thumbs.db
-

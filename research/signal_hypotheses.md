@@ -479,7 +479,7 @@ Mitigations, in order of preference:
 | 8 | Thrifted Jeans momentum lookback sweep | Largest raw upside, largest variance |
 | 9 | Budget allocator with the Liferaft guard evaluated first | A budget breach zeroes *everything* |
 
-## 12. Traps to keep in view
+## 12. Traps to keep in view (superseded in part by §13 — see the Jeans note)
 
 1. **Thrifted Jeans' "steady upwards trend"** — leading language, contradicted by its own chart.
 2. **Bread as a position** — 10.6% of budget for the weakest standalone edge. Read it, don't hold it.
@@ -490,3 +490,170 @@ Mitigations, in order of preference:
 6. **Mean-reverting the Fintech Token through a regime break** — the single largest loss event available.
 7. **Correlated positions via the campus factor** — several signals may fire together, which
    concentrates risk exactly when Sharpe is the tie-break.
+
+---
+
+# 13. Lineage — what AlgoJam 2024 tells us
+
+Source: `Algo-Jam_Data-Specification.pdf` (UQ Fintech Society, dated 8/09/2024).
+Nine instruments, instrument pages only — no rules/budget section in the document.
+
+**Caveat:** this is AlgoJam **1** (2024) and we are writing AlgoJam **3** (2026). There was
+presumably a 2025 edition we haven't seen, so this is the grandparent, not the parent.
+Anything introduced in 2025 is invisible to us.
+
+## 13a. The mapping
+
+Six of nine AJ3 instruments are re-skins of 2024 originals. The price *levels* line up
+almost exactly, which is strong evidence the generators were reused with the same
+parameters:
+
+| AlgoJam 3 | 2024 ancestor | 2024 range | AJ3 range | Limit change |
+|---|---|---|---|---|
+| UQ Dollar | UQ Dollar | 97.5–102.2 | 98.3–101.2 | 650 → 650 |
+| Thrifted Jeans | Thrifted Jeans | 26–85 | 26–95 | 400 → 800 |
+| Fintech Token | Fintech Token | 820–2040 | 430–860 | 35 → 100 |
+| Sausage Sizzle | **Coffee** | 3.20–3.60 | 33–40 | 30,000 → 3,000 |
+| Bread | **Coffee Beans** | 114–134 | 112–137 | 200 → 500 |
+| Sausage | **Milk** | 4.75–6.50 | 4.75–6.20 | 2,500 → 5,000 |
+| MenuDash | **Goober Eats** | 1.42–1.55 | 1.70–2.00 | 75,000 → 75,000 |
+| Boat Party Ticket | **Red Pens / Fun Drink** | 2.19–2.49 / 7–10 | 40–55.5 | 40,000 / 10,000 → 1,000 |
+| Liferaft Ticket | *(none)* | — | — | new |
+
+Bread↔Coffee Beans and Sausage↔Milk match to within a few percent on *both* endpoints.
+Coffee's story ("milk + coffee beans + a barista who moonlights as a Goober Eats
+rideshare driver") is the Sausage Sizzle's story verbatim, with the nouns swapped.
+Goober Eats and MenuDash share a position limit exactly.
+
+Notional is roughly preserved even where limits changed wildly: Coffee 30,000 × $3.60 =
+$108,000 vs Sizzle 3,000 × $39.8 = $119,400.
+
+## 13b. The 2024 doc states the answers outright
+
+AJ3's spec describes *mechanism* and makes you infer; the 2024 spec has an explicit
+"Trading Strategy Approach" paragraph per instrument. It therefore functions as an
+answer key:
+
+| AJ3 instrument | 2024's stated approach |
+|---|---|
+| UQ Dollar | mean reversion around $100 |
+| Thrifted Jeans | momentum / trend-following |
+| Fintech Token | detect regime; MR when stable, momentum when volatile |
+| Sausage Sizzle | track component prices as primary inputs |
+| Bread | long-term bullish / trend-following |
+| Sausage | long-term bullish / trend-following |
+| MenuDash | "predictable fees with bursts of random fluctuations" |
+| Boat Party | seasonality-based forecasting; buy/sell at key points in the cycle |
+
+Every one of these matches the hypothesis derived independently in §1–§8 above. The
+Fintech Token two-regime design in particular is a *carried-over, stable* feature, not a
+2026 invention.
+
+## 13c. Revision — Thrifted Jeans
+
+§7 called the "steady upwards trend" line a trap. That needs softening. The 2024 doc
+asserts the uptrend as **fact**, not as a question: *"there's an underlying upward trend,
+as demand for second-hand, sustainable goods grows over time"*, and recommends momentum.
+The 2024 and AJ3 charts have near-identical shape (both start ~40, trough ~26, end high),
+consistent with the same generator under a different seed.
+
+Revised view: **the positive drift is probably real**, but it is small relative to the
+swings, so trend-following still dominates buy-and-hold. Practical consequence — prefer a
+**long-biased** trend follower (asymmetric thresholds, or a small permanent long tilt)
+over a symmetric one. What to avoid is unconditional buy-and-hold justified by the drift
+alone. The 2026 rewording from assertion into "perhaps… ?" may still be a deliberate
+nudge, so don't lean on the drift as the primary signal.
+
+## 13d. What is genuinely NEW in AJ3 — this is where the points are
+
+Anything absent from the 2024 lineage is a deliberate 2026 addition, and additions are
+where the competition is decided:
+
+1. **The Liferaft Ticket.** No ancestor whatsoever. Pure game theory bolted onto a
+   statistical problem.
+2. **The one-day lag** in the composite. 2024's Coffee had no lag; AJ3 spells out *"today's
+   price comes off yesterday's shopping"*. This is the single biggest escalation, and it
+   converts a correlation into a forecast.
+3. **"Really just the ingredients added up."** 2024's Coffee was explicitly *noisy*:
+   *"also influenced by unpredictable external factors, including supply chain issues,
+   consumer demand"*. AJ3 drops all of that and asserts the recipe is complete. If taken
+   literally, the AJ3 Sizzle is closer to an exact identity than 2024's Coffee ever was —
+   which raises the ceiling on the forecast. Verify against residuals rather than trusting it.
+4. **A trending, cyclical MenuDash.** Goober Eats was flat and rangebound (1.42–1.55, no
+   drift). MenuDash *"has been climbing all year"* and visibly cycles. A whole directional
+   dimension was added to an instrument that previously had none.
+5. **Weekly language.** The 2024 Milk and Coffee Beans blurbs say only "steady upward with
+   random jumps" — no weekly structure anywhere in the 2024 document. AJ3 adds *"over the
+   course of a week they often move in larger, less predictable jumps"*, the *"same weekend
+   order"*, *"weekends behind a folding table"*, *"Sunday morning"*. The day-of-week
+   hypothesis in §10 is therefore a **genuine 2026 addition**, not inherited flavour text.
+   That substantially raises its prior.
+6. **Two seasonal instruments merged into one.** Red Pens (very clean) + Fun Drink (noisy)
+   → a single Boat Party Ticket. See §13e.
+
+## 13e. Boat Party — inherited shape details worth exploiting
+
+The Red Pens chart is a near **square wave**: sharp step up, flat plateau at ~2.47, sharp
+step down, flat plateau at ~2.19, ~5 cycles/year. Fun Drink is the noisy seasonal, ~2–3
+cycles, with an explicit second layer (*"additional factors such as consumer preferences,
+seasonal events, and market sentiment"*). AJ3's Boat Party has Fun Drink's cycle count and
+noise, Red Pens' *"same shape at the same point every year"* promise, and the blurb winks
+at both (*"Fun drinks are fizzin'"*).
+
+Two concrete refinements to §4:
+
+- **Use the empirical day-of-year profile, not a low-order Fourier fit.** If the shape
+  inherits Red Pens' plateau-and-step structure, a Fourier basis needs many harmonics to
+  represent it and will smear the transitions — which is exactly where the P&L is. AJ3's
+  chart does show plateaus (days ~60–100 and ~310–365 are flat).
+- **P&L concentrates at the transitions.** Position should be near-max around the seasonal
+  turns and near-flat during plateaus. A slope-proportional rule does this automatically —
+  another reason to trade slope rather than level.
+- **Look for a second layer.** If Fun Drink's short-term component carried over, the
+  residual after removing the seasonal profile may itself mean-revert. That would be an
+  independent Boat Party signal most teams won't look for. Cheap to test: subtract the
+  profile, check residual autocorrelation.
+
+## 13f. MenuDash — check for quantisation
+
+The Goober Eats series is visibly **discretised**: values cluster on $1.42, 1.44, 1.46,
+1.48 and sit at exactly $1.50 for long stretches. That is AJ3's *"the app **rounds**,
+surges and reshuffles its fees"* made visible a generation earlier.
+
+If MenuDash inherits it, the observation noise is **quantisation noise, not Gaussian** —
+bounded, non-normal, and partly deterministic. Consequences:
+
+- Check the tick size first (`np.diff(np.unique(prices))`). It changes the filter design.
+- A price sitting exactly on a tick carries less information than one that just moved; a
+  Gaussian Kalman filter will mis-weight both.
+- Rounding puts a floor on how much of the deviation is genuinely harvestable — some of the
+  apparent noise is a rounding artefact that will not revert in the direction you expect.
+
+## 13g. The budget bind is new — and the Liferaft is what causes it
+
+2024 notionals at end-of-year prices sum to roughly **$559k**; even near peak prices it sits
+around $600k. So the budget was, at most, marginally binding in 2024.
+
+AJ3 sums to **$694k**. But subtract the Liferaft's $100,000 and you get **$594k — just under
+the cap.**
+
+That is very unlikely to be a coincidence. The eight price-series instruments were sized to
+fit the budget almost exactly; **the Liferaft is precisely what makes the budget bind.**
+
+This reframes the raft decision. Its cost isn't only the risk of being on the wrong side —
+it is that holding it forces you to shed ~$100k of other exposure. The correct comparison is
+its expected $5–8k/day against the P&L of your *weakest* $100k of exposure (per §0, that's
+bread first, then whichever else scores worst per dollar). Both halves of that trade need to
+be in the allocator.
+
+## 13h. Updated test additions
+
+| # | Test | Origin |
+|---|---|---|
+| A | MenuDash tick size / quantisation check | §13f |
+| B | Boat Party: empirical profile vs Fourier; plateau detection | §13e |
+| C | Boat Party: does the post-seasonal residual mean-revert? | §13e (Fun Drink layer) |
+| D | Jeans: long-biased vs symmetric trend follower | §13c |
+| E | Sizzle residual size — is it an exact identity or a noisy one? | §13d.3 |
+| F | Allocator: Liferaft on/off vs the marginal $100k of exposure | §13g |
+
