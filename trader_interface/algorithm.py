@@ -4,6 +4,23 @@ import numpy as np
 # Custom trading Algorithm
 class Algorithm:
 
+    TOTAL_BUDGET = 600_000.0
+
+    # When capital is scarce, shed the weakest Round 1 edge per dollar first.
+    # Liferaft is last because a non-zero request should already have passed
+    # that strategy's confidence and price/headroom gates.
+    BUDGET_TRIM_ORDER = (
+        "Bread",
+        "Sausage",
+        "Sausage Sizzle",
+        "MenuDash",
+        "UQ Dollar",
+        "Thrifted Jeans",
+        "Fintech Token",
+        "Boat Party Ticket",
+        "Liferaft Ticket",
+    )
+
     SIZZLE_SEED = np.array(
         [
             0.00530057,  # Intercept
@@ -41,11 +58,11 @@ class Algorithm:
     # Frozen offline 21-day/order-2 SavGol calendar regime. During Round 2,
     # strong seasonal slopes use +/- and neutral days use causal live EWMA.
     BOAT_PARTY_SEMESTER_SIGNALS = (
-        "0000000+++++++++++++++000000000+++++++++0000000000000------------------00-0-0000"
-        "-------0-00000-0000++0++++++++++000000----------------00---00++++++000----------"
-        "00++0++++++0+++++++++++++++++++-++000--0------------------0000--000----00000++++"
-        "+++++++0++000--0------------------00-0000+++++000-----------00++0++++++++++++0+0"
-        "0000-0000000000000000000000000000000000000000"
+        "0000000+++++++++++++++000000000+++++++++0000000000000------------------00"
+        "0-00000--------00000000000+++++++++++++000000----------------00---00+++++"
+        "+000----------00++++++++++++++++++++++++++++++++000---------------------0"
+        "000--000----00000++++++++++++++000---------------------0000000+++++000---"
+        "--------00++++++++++++++++00000000000000000000000000000000000000000000000"
     )
 
     # FUNCTION TO SETUP ALGORITHM CLASS
@@ -70,13 +87,59 @@ class Algorithm:
         desired_positions["UQ Dollar"] = self._uq_dollar_position()
         desired_positions["Sausage Sizzle"] = self._sausage_sizzle_position()
         desired_positions["Bread"] = self._food_ema_position("Bread")
-        # desired_positions["Sausage"] = self._food_ema_position("Sausage")
+        desired_positions["Sausage"] = self._food_ema_position("Sausage")
         desired_positions["MenuDash"] = self._menudash_position()
         desired_positions["Thrifted Jeans"] = self._thrifted_jeans_position()
         desired_positions["Fintech Token"] = self._fintech_token_position()
         desired_positions["Boat Party Ticket"] = self._boat_party_position()
 
-        return desired_positions
+        return self._apply_budget(desired_positions)
+
+    def _apply_budget(self, desired_positions):
+        """Trim low-priority units until gross marked value is within budget."""
+        adjusted = dict(desired_positions)
+        prices = {
+            instrument: float(self.data[instrument][-1])
+            for instrument in adjusted
+        }
+        gross_value = sum(
+            abs(position * prices[instrument])
+            for instrument, position in adjusted.items()
+        )
+
+        if gross_value <= self.TOTAL_BUDGET:
+            return adjusted
+
+        trim_order = self.BUDGET_TRIM_ORDER + tuple(
+            instrument
+            for instrument in adjusted
+            if instrument not in self.BUDGET_TRIM_ORDER
+        )
+
+        for instrument in trim_order:
+            if instrument not in adjusted:
+                continue
+
+            position = adjusted[instrument]
+            unit_value = abs(prices[instrument])
+
+            if position == 0 or not np.isfinite(unit_value) or unit_value <= 0:
+                continue
+
+            excess = gross_value - self.TOTAL_BUDGET
+            if excess <= 0:
+                break
+
+            units_to_trim = min(
+                abs(position),
+                max(1, int(np.ceil(excess / unit_value))),
+            )
+            adjusted[instrument] = int(
+                position - np.sign(position) * units_to_trim
+            )
+            gross_value -= units_to_trim * unit_value
+
+        return adjusted
 
     def _uq_dollar_position(self):
         price = self.data["UQ Dollar"][-1]
@@ -437,7 +500,7 @@ class Algorithm:
                 float(historical_price) - fair_value
             )
 
-        price_window = prices[-self.BOAT_VOL_WINDOW:]
+        price_window = prices[-self.BOAT_VOL_WINDOW :]
         rolling_vol = max(float(np.std(price_window, ddof=0)), 1e-12)
         z_score = (float(prices[-1]) - fair_value) / rolling_vol
         current_position = self.positions.get(instrument, 0)
