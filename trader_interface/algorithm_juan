@@ -15,11 +15,11 @@ JEANS_Q_LEVEL = 0.47
 JEANS_Q_SLOPE = 0.04
 JEANS_OBSERVATION_VARIANCE = 10.0
 JEANS_INITIAL_SLOPE_VARIANCE = 4.0
-JEANS_SHORT_CONFIDENCE = 0.4
+JEANS_SHORT_CONFIDENCE = 0.9
 JEANS_ALPHA = 0.09
 JEANS_VOL_WINDOW = 14
-JEANS_TREND_THRESHOLD = 0.9
-JEANS_REVERT_THRESHOLD = 0.2
+JEANS_TREND_THRESHOLD = 0.8
+JEANS_REVERT_THRESHOLD = 0.1
 
 BREAD_Q_LEVEL = 0.66
 BREAD_Q_SLOPE = 0.04
@@ -92,8 +92,9 @@ class Algorithm():
         price = self.get_current_price("Thrifted Jeans")
 
         if not hasattr(self, "_jeans_ewma") or self.day == 0:
-            self._jeans_ewma = price
+            self._jeans_ewma = self._jeans_prev_ewma = price
         else:
+            self._jeans_prev_ewma = self._jeans_ewma
             self._jeans_ewma += JEANS_ALPHA * (price - self._jeans_ewma)
             
         if self.day == 0:
@@ -155,16 +156,19 @@ class Algorithm():
 
         price_window = prices[-JEANS_VOL_WINDOW:]
         rolling_std = max(float(np.std(price_window)), 1e-12)
+
         z_score = (price - self._jeans_ewma) / rolling_std
+        ewma_slope = self._jeans_ewma - self._jeans_prev_ewma
+        print(ewma_slope)
 
         current_pos = self.positions["Thrifted Jeans"]
 
         if current_pos == 0:
-            if z_score >= JEANS_REVERT_THRESHOLD:
-                return -limit
-            
-            if z_score <= -JEANS_REVERT_THRESHOLD:
+            if z_score <= -JEANS_REVERT_THRESHOLD or ewma_slope > 0:
                 return limit
+
+            elif z_score >= JEANS_REVERT_THRESHOLD:
+                return -limit
             
             return 0
         
