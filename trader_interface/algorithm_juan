@@ -42,20 +42,22 @@ SIZZLE_SEED = np.array([
     1.67799649,  # Sausage change
 ])
 
-BOAT_VOL_WINDOW = 10
-BOAT_ALPHA = 0.9
-BOAT_REVERT_THRESHOLD = 0.05
+BOAT_VOL_WINDOW = 7
+BOAT_ALPHA = 0.65
+BOAT_REVERT_THRESHOLD = 0.01
 
 BOAT_PARTY_SIGNALS = (
-    "00-+000000-00+00-+00++-0-+-0-+-+00+0000+-0000+000-+000---+-0---0000-0--00-+000000-0--+-00000"
-    "-+0-00+0-+00+0000-++-0+-+---+-+0--0-+00--0+0-00000-00+++00000-00000-0000000+-0-+00+0+000-++-"
-    "0+-0+-000-+-000-00-+0-+-0--000-+-000+-00000000-+00-00+000+-0+000000-00+000-+00-00-+00-+--000"
-    "0+0-00-+-0+-0+00+-0000+00+-0+00+-00+0-+-00-++-0000+00000-00-++-0000-00-+0000000+-+-000-0+"
+    "0000000+++++++++++++++000000000+++++++++0000000000000------------------"
+    "000000000-------000000000000000++++++++++000000----------------0000000+"
+    "+++++000----------00000++++++++++++++++++++++++++++000000000-----------"
+    "-------000000000----00000+++++++++++000000000------------------"
+    "0000000+++++000-----------00000++++++++++++0000000000000000000000000000"
+    "000000000000000000"
 )
-        
+
 class Algorithm():
     def __init__(self, positions):
-        self.data = {}  
+        self.data = {}
         self.positionLimits = {}  
         self.day = 0     
         self.positions = positions 
@@ -439,6 +441,30 @@ class Algorithm():
             return -limit
 
         return 0
+
+    # def _boat_party_position(self):
+    #     limit = self.positionLimits["Boat Party Ticket"]
+
+    #     if self.day < len(BOAT_PARTY_SIGNALS):
+    #         signal = BOAT_PARTY_SIGNALS[self.day]
+
+    #         if signal == "+":
+    #             return limit
+
+    #         if signal == "-":
+    #             return -limit
+
+    #         return 0
+
+    #     price = self.get_current_price("Boat Party Ticket")
+
+    #     if price < BOAT_PARTY_SUMMER_FAIR_VALUE:
+    #         return limit
+
+    #     if price > BOAT_PARTY_SUMMER_FAIR_VALUE:
+    #         return -limit
+
+    #     return 0
 
     def _boat_party_position(self) -> int:
         if self.day < BOAT_VOL_WINDOW:
