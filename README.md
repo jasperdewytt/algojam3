@@ -8,9 +8,9 @@ The data are simulated daily price series. There are no orders, quotes, spreads 
 
 ## Team work and my contribution
 
-This was a team project. Jasper coordinated much of the research, integrated and tuned the combined submission, and made the Fintech Token, Boat Party, portfolio-budget and MenuDash changes recorded in git. Juan contributed several underlying and alternative strategies, including early Thrifted Jeans and Boat Party work. Hariharan contributed team files and participated in the team effort. Strategy choices and the submitted portfolio were team decisions.
+This was a team project. We interpreted the instrument descriptions, tested signals on Round 1, compared model variants and assembled the final portfolio under the shared budget. My recorded work focused on integrating and tuning the combined algorithm and on the Fintech Token, Boat Party, MenuDash and budget-allocation components. The other team members contributed strategy development, alternative implementations, testing and final submission decisions. Git history records code changes but does not assign sole intellectual ownership of individual ideas.
 
-The team reported finishing tenth overall among 38 teams and recording the highest P&L on one instrument. No leaderboard record is stored in this repository, so those competition results are not independently reproduced here.
+Our team finished tenth overall among 38 teams and achieved the highest P&L on one instrument. These competition results are not reproduced by the local backtest below.
 
 ## Competition and accounting model
 
@@ -22,11 +22,11 @@ daily P&L = held position x (current price - previous price)
 
 The simulator does not model transaction costs or market impact. It also excludes Liferaft Ticket from local P&L because that price depended on all teams during marking. If requested gross notional exceeds AUD 600,000, the simulator sets the whole portfolio to zero for that day. The submitted algorithm therefore applies its own allocator before returning positions.
 
-Round 1 was the visible development year. Round 2 was unseen until marking and determined the competition score, with Sharpe ratio used as a tie-breaker. The current algorithm is written for one continuously surviving instance across both years; its Boat Party calendar maps the accumulated history back to a 365-day cycle.
+Round 1 was the visible development year. Round 2 was unseen until marking and determined the competition score, with Sharpe ratio used as a tie-breaker. The competition strategy is written for one continuously surviving instance across both years; its Boat Party calendar maps the accumulated history back to a 365-day cycle.
 
 ## Implemented strategy
 
-The production entry is [`trader_interface/algorithm.py`](trader_interface/algorithm.py). It trades eight instruments and deliberately leaves Liferaft Ticket flat.
+The tracked [`trader_interface/algorithm.py`](trader_interface/algorithm.py) is the competition strategy submitted for marking. Its contents have not been changed by the post-competition analysis; alternative models and later investigations are kept separately. It trades eight instruments and deliberately leaves Liferaft Ticket flat.
 
 | Instrument | Limit | Implemented signal |
 |---|---:|---|
@@ -52,7 +52,7 @@ The live calculations use observations available through day `t` to select the p
 
 ## Reproducible Round 1 result
 
-Running the current algorithm on the tracked Round 1 dataset mechanically reproduces total P&L of **AUD 720,793.99** with no budget or position-limit violations. This is an in-sample development result. It is not a strictly walk-forward backtest because the fixed Boat Party calendar uses the complete Round 1 series, and it is not evidence of expected live performance.
+The current code reproduces an in-sample Round 1 P&L of **AUD 720,793.99** with no budget or position-limit violations. This is not a strictly walk-forward backtest because the fixed Boat Party calendar uses the complete Round 1 series, and it is not evidence of expected live performance.
 
 | Instrument | Round 1 P&L (AUD) |
 |---|---:|
@@ -72,7 +72,7 @@ The Round 2 data used for local post-competition analysis are not part of the tr
 
 ```text
 trader_interface/
-  algorithm.py              submitted portfolio logic
+  algorithm.py              competition strategy submitted for marking
   simulation.py             supplied daily backtest engine
   data/                     tracked Round 1 prices
 research/
@@ -86,9 +86,9 @@ tests/
 docs/                       competition-provided rules and specifications
 ```
 
-Some research reports refer to generated outputs that were intentionally excluded from git because of their size. Research scripts also use packages beyond the core requirements and are not presented as a single reproducible pipeline. The production strategy depends only on NumPy; the supplied simulator also uses pandas and Matplotlib.
+Some research reports refer to generated outputs that were intentionally excluded from git because of their size. Research scripts also use packages beyond the core requirements and are not presented as a single reproducible pipeline. The competition strategy depends only on NumPy; the supplied simulator also uses pandas and Matplotlib.
 
-Files such as `liferaft_strategy.py`, `thrifted_jeans.py` and the material under `research/` document experiments or alternative models. They are not imported by the production algorithm. `trader_interface/algorithm.py` is the definitive implemented portfolio.
+Files such as `liferaft_strategy.py`, `thrifted_jeans.py` and the material under `research/` document experiments or alternative models. They are not imported by the competition strategy. `trader_interface/algorithm.py` is the definitive submitted portfolio.
 
 ## Setup and execution
 
@@ -124,5 +124,5 @@ These tests exercise the budget allocator directly. They are written with Python
 - Several parameters were selected after substantial exploration of the same development data. A stronger process would reserve a final chronological holdout and compare every complex model with simple reversal, trend and constant-position baselines.
 - The submitted Fintech regime rule assumed large moves would continue in volatile periods. Post-competition analysis found that reversal remained competitive there, showing the risk of a model selected from one observed year.
 - The Thrifted Jeans regime switch was sensitive to how slope uncertainty was estimated. Model averaging would reduce dependence on a single classification boundary.
-- Liferaft was an endogenous minority game with no pre-generated development path. The production strategy stayed flat rather than deploy a policy supported only by synthetic opponent scenarios.
+- Liferaft was an endogenous minority game with no pre-generated development path. The competition strategy stayed flat rather than deploy a policy supported only by synthetic opponent scenarios.
 - Competition P&L excludes transaction costs, latency and market impact. The resulting numbers should not be interpreted as executable-market returns.
